@@ -12,6 +12,7 @@ mod api;
 mod config;
 mod dto;
 mod error;
+mod mcts;
 mod state;
 mod web;
 

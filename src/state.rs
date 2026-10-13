@@ -277,6 +277,8 @@ pub struct GameSession {
     /// AI 异步决策完成后校验版本号，不一致即丢弃结果。
     pub version: u64,
     pub ai: Option<AiConfig>,
+    /// 最近一次 MCTS 搜索保留的树（AI 回合或手动搜索时替换；仅查询用）
+    pub mcts_tree: Option<crate::mcts::MctsTreeBox>,
 }
 
 impl GameSession {
@@ -287,6 +289,7 @@ impl GameSession {
             history: Vec::new(),
             version: 0,
             ai,
+            mcts_tree: None,
         }
     }
 
@@ -453,6 +456,8 @@ impl GameSession {
             red_hp: snap.scores[0],
             black_hp: snap.scores[1],
             over,
+            terminated,
+            truncated,
             over_reason,
             winner: winner_str(winner),
             last_action: (snap.last_action >= 0).then_some(snap.last_action as usize),

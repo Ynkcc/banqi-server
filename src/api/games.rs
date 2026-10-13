@@ -168,10 +168,12 @@ pub async fn move_piece(
         player: player_str(mover),
         action: human_view,
     }];
+    let mut mcts_stats = None;
     if let Some(version) = ai_version {
         match ai::run_ai_turn(&app, game_id, version).await? {
-            Some((new_state, ai_action)) => {
+            Some((new_state, ai_action, stats)) => {
                 actions.push(ai_action);
+                mcts_stats = stats;
                 state = new_state;
             }
             None => {
@@ -184,7 +186,7 @@ pub async fn move_piece(
         }
     }
 
-    Ok(Json(MoveResp { state, actions }))
+    Ok(Json(MoveResp { state, actions, mcts_stats }))
 }
 
 /// POST /api/games/:id/ai-move
@@ -206,9 +208,10 @@ pub async fn ai_move(
     };
 
     match ai::run_ai_turn(&app, game_id, version).await? {
-        Some((state, ai_action)) => Ok(Json(MoveResp {
+        Some((state, ai_action, mcts_stats)) => Ok(Json(MoveResp {
             state,
             actions: vec![ai_action],
+            mcts_stats,
         })),
         None => Err(ApiError::BadRequest(
             "AI 结果作废（期间对局被并发修改），请重试".to_string(),

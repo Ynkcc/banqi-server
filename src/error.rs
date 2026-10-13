@@ -19,6 +19,9 @@ pub enum ApiError {
     /// 对局未启用 AI 对手
     #[error("对局未启用 AI 对手")]
     AiDisabled,
+    /// 该对局暂无 MCTS 搜索树（AI 未走过子且未手动搜索）
+    #[error("暂无 MCTS 搜索树：等待 AI 走子或 POST /mcts/search")]
+    MctsTreeMissing,
     /// 通用请求错误（参数非法 / 历史不足等）
     #[error("{0}")]
     BadRequest(String),
@@ -41,6 +44,7 @@ impl ApiError {
             ApiError::GameOver | ApiError::AiDisabled | ApiError::NotAiTurn => {
                 StatusCode::CONFLICT
             }
+            ApiError::MctsTreeMissing => StatusCode::NOT_FOUND,
             ApiError::BadRequest(_) => StatusCode::BAD_REQUEST,
             ApiError::ModelUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             ApiError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -54,6 +58,7 @@ impl ApiError {
             ApiError::IllegalAction { .. } => "ILLEGAL_ACTION",
             ApiError::GameOver => "GAME_OVER",
             ApiError::AiDisabled => "AI_DISABLED",
+            ApiError::MctsTreeMissing => "MCTS_TREE_MISSING",
             ApiError::NotAiTurn => "NOT_AI_TURN",
             ApiError::BadRequest(_) => "BAD_REQUEST",
             ApiError::ModelUnavailable(_) => "MODEL_UNAVAILABLE",

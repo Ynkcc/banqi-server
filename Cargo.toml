@@ -21,7 +21,7 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# 内嵌 Web 前端（banqi-web/public）：debug 模式直接读文件系统（热改即生效），release 编译期打包进二进制
+# 内嵌 Web 前端（banqi-frontend/dist）：debug 模式直接读文件系统（热改即生效），release 编译期打包进二进制
 rust-embed = "8"
 mime_guess = "2.0"
 

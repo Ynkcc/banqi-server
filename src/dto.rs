@@ -111,6 +111,10 @@ pub struct GameStateResp {
     pub black_hp: i32,
     /// 对局是否结束
     pub over: bool,
+    /// 胜负分出而结束（对齐前端 StepResult.terminated）
+    pub terminated: bool,
+    /// 步数/规则截断而结束（对齐前端 StepResult.truncated）
+    pub truncated: bool,
     /// 终局原因："checkmate"（胜负分出）/ "draw"（无吃子判和）/ "max_steps"（步数截断）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub over_reason: Option<String>,
@@ -134,12 +138,40 @@ pub struct AppliedAction {
     pub action: ActionView,
 }
 
+/// 一次 Gumbel MCTS 搜索统计（对齐前端 types.ts `MctsSearchStats`）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MctsStatsDto {
+    pub reused: bool,
+    pub budget: usize,
+    pub actual_sims: u32,
+    pub max_depth: usize,
+    pub nodes: usize,
+}
+
+impl MctsStatsDto {
+    /// 从会话中保留的搜索树提取统计（无树时返回 None）。
+    pub fn from_session(tree: Option<&crate::mcts::MctsTreeBox>) -> Option<Self> {
+        let stats = &tree?.root_info().stats;
+        Some(Self {
+            reused: stats.reused,
+            budget: stats.budget,
+            actual_sims: stats.actual_sims,
+            max_depth: stats.max_depth,
+            nodes: stats.nodes,
+        })
+    }
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MoveResp {
     pub state: GameStateResp,
     /// 本次请求实际执行的动作序列（人类 1 步 + 可能的 AI 回应 1 步）
     pub actions: Vec<AppliedAction>,
+    /// AI 回合的 MCTS 搜索统计（本请求含 AI 落子时才有）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mcts_stats: Option<MctsStatsDto>,
 }
 
 #[derive(Debug, Serialize)]
@@ -169,11 +201,18 @@ pub struct GameCreatedResp {
     pub state: GameStateResp,
 }
 
+/// 变体元信息：与前端 `VariantInfo`（types.ts）字段一一对应。
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VariantInfo {
     /// 变体 ID（`Variant::as_str()`）
     pub id: String,
+    /// 面向用户的显示名（`Variant::label()`）
+    pub label: String,
+    pub rows: usize,
+    pub cols: usize,
+    pub initial_health: i32,
+    pub max_consecutive_moves_for_draw: usize,
     /// 是否有已加载的模型（AI 可用）
     pub ai_available: bool,
 }
