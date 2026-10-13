@@ -1,0 +1,153 @@
+//! 服务器配置：CLI 参数优先，环境变量兜底，最后取默认值。
+
+use std::path::PathBuf;
+
+use banqi_core::core::env::Variant;
+
+#[derive(Debug, Clone)]
+pub struct ServerConfig {
+    /// 监听地址，如 `127.0.0.1:8080`
+    pub addr: String,
+    /// ONNX 模型目录（文件名即变体 ID：`<variant_id>.onnx`）
+    pub models_dir: PathBuf,
+    /// ONNX 会话池大小（并发推理通道数）
+    pub sessions: usize,
+    /// 推理设备："cpu" / "cuda" / "auto"（cuda 需 onnx-cuda feature）
+    pub device: String,
+    /// 默认 MCTS 模拟次数（创建对局未指定时使用）
+    pub default_sims: usize,
+    /// 默认对局变体（创建对局未指定时使用；None = 取首个有模型者，再退回首个变体）
+    pub default_variant: Option<Variant>,
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            addr: "127.0.0.1:8080".to_string(),
+            models_dir: PathBuf::from("models"),
+            sessions: 1,
+            device: "cpu".to_string(),
+            default_sims: 128,
+            default_variant: None,
+        }
+    }
+}
+
+impl ServerConfig {
+    /// 解析配置：CLI 参数 > 环境变量 > 默认值。
+    pub fn from_env_and_args() -> Result<Self, String> {
+        let mut cfg = Self::from_env();
+        cfg.apply_args(std::env::args().skip(1))?;
+        cfg.validate()?;
+        Ok(cfg)
+    }
+
+    /// 环境变量兜底：BANQI_ADDR / BANQI_MODELS_DIR / BANQI_SESSIONS / BANQI_DEVICE / BANQI_DEFAULT_SIMS / BANQI_DEFAULT_VARIANT
+    fn from_env() -> Self {
+        let mut cfg = Self::default();
+        if let Ok(v) = std::env::var("BANQI_ADDR") {
+            cfg.addr = v;
+        }
+        if let Ok(v) = std::env::var("BANQI_MODELS_DIR") {
+            cfg.models_dir = PathBuf::from(v);
+        }
+        if let Ok(v) = std::env::var("BANQI_SESSIONS") {
+            if let Ok(n) = v.parse() {
+                cfg.sessions = n;
+            }
+        }
+        if let Ok(v) = std::env::var("BANQI_DEVICE") {
+            cfg.device = v;
+        }
+        if let Ok(v) = std::env::var("BANQI_DEFAULT_SIMS") {
+            if let Ok(n) = v.parse() {
+                cfg.default_sims = n;
+            }
+        }
+        if let Ok(v) = std::env::var("BANQI_DEFAULT_VARIANT") {
+            cfg.default_variant = parse_variant(&v);
+        }
+        cfg
+    }
+
+    /// CLI 参数：--addr / --models-dir / --sessions / --device / --default-sims
+    fn apply_args<I: Iterator<Item = String>>(&mut self, args: I) -> Result<(), String> {
+        let args: Vec<String> = args.collect();
+        let mut i = 0;
+        while i < args.len() {
+            let (key, value) = match (args[i].as_str(), args.get(i + 1)) {
+                // --key=value 形式
+                (k, _) if k.starts_with("--") && k.contains('=') => {
+                    let (k, v) = k.split_once('=').unwrap();
+                    (k.to_string(), Some(v.to_string()))
+                }
+                // --key value 形式
+                (k, v) if k.starts_with("--") => (k.to_string(), v.cloned()),
+                (k, _) => return Err(format!("未知参数: {k}")),
+            };
+            let value = value.ok_or_else(|| format!("参数 {key} 缺少值"))?;
+            match key.as_str() {
+                "--addr" => self.addr = value,
+                "--models-dir" => self.models_dir = PathBuf::from(value),
+                "--sessions" => {
+                    self.sessions = value
+                        .parse()
+                        .map_err(|_| format!("--sessions 需要正整数，得到: {value}"))?
+                }
+                "--device" => self.device = value,
+                "--default-sims" => {
+                    self.default_sims = value
+                        .parse()
+                        .map_err(|_| format!("--default-sims 需要正整数，得到: {value}"))?
+                }
+                "--default-variant" => {
+                    self.default_variant = Some(parse_variant(&value).ok_or_else(|| {
+                        format!(
+                            "--default-variant 未知变体: {value}（可用: {}）",
+                            Variant::ALL.iter().map(|v| v.as_str()).collect::<Vec<_>>().join(", ")
+                        )
+                    })?)
+                }
+                "--help" | "-h" => {
+                    return Err(Self::usage());
+                }
+                other => return Err(format!("未知参数: {other}")),
+            }
+            i += 2;
+        }
+        Ok(())
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if self.sessions == 0 {
+            return Err("--sessions 必须至少为 1".to_string());
+        }
+        if self.default_sims == 0 {
+            return Err("--default-sims 必须至少为 1".to_string());
+        }
+        Ok(())
+    }
+
+    fn usage() -> String {
+        "banqi-server — Banqi 暗棋对弈 HTTP 服务\n\
+         \x20 用法: banqi-server [选项]\n\
+         \x20   --addr <ADDR>               监听地址（默认 127.0.0.1:8080，env BANQI_ADDR）\n\
+         \x20   --models-dir <DIR>          ONNX 模型目录（默认 models，env BANQI_MODELS_DIR）\n\
+         \x20   --sessions <N>              ONNX 会话池大小（默认 1，env BANQI_SESSIONS）\n\
+         \x20   --device <DEV>              cpu|cuda|auto（默认 cpu，env BANQI_DEVICE）\n\
+         \x20   --default-sims <N>          默认 MCTS 模拟次数（默认 128，env BANQI_DEFAULT_SIMS）\n\
+         \x20   --default-variant <ID>      默认对局变体（env BANQI_DEFAULT_VARIANT；\n\
+         \x20                               缺省时取首个有模型者，再退回首个变体）"
+            .to_string()
+    }
+}
+
+/// 由变体字符串标识解析 `Variant`（不认识返回 None）。
+///
+/// 直接遍历 `Variant::ALL` 匹配 `as_str()`，无任何硬编码变体清单。
+pub fn parse_variant(s: &str) -> Option<Variant> {
+    Variant::ALL
+        .iter()
+        .copied()
+        .find(|v| v.as_str().eq_ignore_ascii_case(s))
+}
