@@ -33,7 +33,9 @@ pub struct MoveReq {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UndoReq {
-    /// 回退步数（默认 1；每步含 AI 回合时一并回退——按快照逐帧回退）
+    /// 显式回退步数（按快照逐帧回退）。
+    /// 缺省时执行「悔棋到当前行棋方上次行动前」语义：自动回退若干步，
+    /// 直到回到当前行棋方上次行动前的局面（AI 对局中含 AI 回合）。
     #[serde(default)]
     pub steps: Option<usize>,
 }
@@ -128,6 +130,8 @@ pub struct GameStateResp {
     pub ai: AiInfoView,
     /// 当前是否轮到 AI 行棋
     pub ai_to_move: bool,
+    /// 当前是否可悔棋（当前行棋方存在更早的行动快照且对局未结束）
+    pub undoable: bool,
 }
 
 #[derive(Debug, Serialize)]

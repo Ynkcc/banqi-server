@@ -226,13 +226,21 @@ pub async fn undo(
     Json(req): Json<UndoReq>,
 ) -> Result<Json<GameStateResp>, ApiError> {
     let game_id = parse_game_id(&id)?;
-    let steps = req.steps.unwrap_or(1);
 
     let mut games = app.games.write().expect("games 锁中毒");
     let s = games
         .get_mut(&game_id)
         .ok_or_else(|| ApiError::GameNotFound(id.clone()))?;
-    s.undo(steps)?;
-    tracing::info!(game = %game_id, "悔棋 {steps} 步");
+    // 缺省语义：回退到当前行棋方上次行动前（AI 对局中自动含 AI 回合）
+    match req.steps {
+        Some(steps) => {
+            s.undo(steps)?;
+            tracing::info!(game = %game_id, "悔棋 {steps} 步");
+        }
+        None => {
+            s.undo_to_current_player()?;
+            tracing::info!(game = %game_id, "悔棋至当前行棋方上次行动前");
+        }
+    }
     Ok(Json(s.view(game_id)))
 }

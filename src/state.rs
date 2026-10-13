@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use banqi_core::core::env::error::EnvError;
 use banqi_core::core::env::types::Player;
-use banqi_core::core::env::{GameEnv, PositionSnapshot, SnapshotEnv, Variant};
+use banqi_core::core::env::{GameEnv, MoveHistory, PositionSnapshot, SnapshotEnv, Variant};
 #[cfg(feature = "onnx")]
 use banqi_engine::inference::onnx::OnnxModel;
 
@@ -272,7 +272,7 @@ pub struct GameSession {
     /// 当前局面完整快照
     pub current: PositionSnapshot,
     /// 走子前的快照栈（悔棋；快照为棋盘常量级开销）
-    pub history: Vec<PositionSnapshot>,
+    pub history: MoveHistory,
     /// 单调递增版本号：任何状态变更（走子/悔棋）+1；
     /// AI 异步决策完成后校验版本号，不一致即丢弃结果。
     pub version: u64,
@@ -286,7 +286,7 @@ impl GameSession {
         Self {
             variant,
             current: variant::initial_snapshot(variant),
-            history: Vec::new(),
+            history: MoveHistory::new(),
             version: 0,
             ai,
             mcts_tree: None,
@@ -326,7 +326,7 @@ impl GameSession {
         Ok(outcome)
     }
 
-    /// 悔棋：回退 `steps` 个快照（对局结束后不可悔棋）。
+    /// 悔棋：按快照逐帧回退 `steps` 步（对局结束后不可悔棋）。
     pub fn undo(&mut self, steps: usize) -> Result<(), ApiError> {
         if self.is_over() {
             return Err(ApiError::GameOver);
@@ -334,16 +334,31 @@ impl GameSession {
         if steps == 0 {
             return Err(ApiError::BadRequest("steps 必须至少为 1".to_string()));
         }
-        if self.history.len() < steps {
-            return Err(ApiError::BadRequest(format!(
+        let snap = self.history.undo_steps(steps).ok_or_else(|| {
+            ApiError::BadRequest(format!(
                 "可回退步数不足: 请求 {steps}，当前仅 {} 步历史",
                 self.history.len()
-            )));
+            ))
+        })?;
+        self.current = snap;
+        self.version += 1;
+        Ok(())
+    }
+
+    /// 悔棋到当前行棋方上次行动前：回退快照直至回到「当前行棋方即将行动」的局面。
+    ///
+    /// AI 对局中（AI 走完后轮到人类）会一并回退 AI 与人类各一步；
+    /// PvP 中即回退最近一步。当前玩家尚未行动过时返回错误。
+    pub fn undo_to_current_player(&mut self) -> Result<(), ApiError> {
+        if self.is_over() {
+            return Err(ApiError::GameOver);
         }
-        for _ in 0..steps {
-            self.current = self.history.pop().expect("已校验长度");
-            self.version += 1;
-        }
+        let target = self.current.current_player;
+        let snap = self.history.undo_to_player_turn(target).ok_or_else(|| {
+            ApiError::BadRequest("没有可悔的棋步（当前玩家尚未行动过）".to_string())
+        })?;
+        self.current = snap;
+        self.version += 1;
         Ok(())
     }
 
@@ -376,6 +391,12 @@ impl GameSession {
             }
             None => false,
         }
+    }
+
+    /// 当前是否可悔棋：对局未结束，且历史中存在「当前行棋方上次行动前」的快照
+    ///（悔棋总是回到当前行棋方自己上次行动前，可连续触发以反悔所有自己的行动）。
+    pub fn undoable(&self) -> bool {
+        !self.is_over() && self.history.undoable(self.current.current_player)
     }
 
     /// 当前完整状态视图（快照字段 + config 推导 + 泛型环境求合法动作）。
@@ -465,6 +486,7 @@ impl GameSession {
             legal_actions,
             ai: ai_view,
             ai_to_move: self.ai_to_move(),
+            undoable: self.undoable(),
         }
     }
 
