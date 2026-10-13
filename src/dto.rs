@@ -126,6 +126,15 @@ pub struct GameStateResp {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_action: Option<usize>,
     pub board: Vec<CellView>,
+    /// 红方阵亡棋子类型列表（小写英文，含重复项；Tauri 后端为 Debug 全名）
+    pub dead_red: Vec<String>,
+    /// 黑方阵亡棋子类型列表
+    pub dead_black: Vec<String>,
+    /// 红方未翻开（隐藏）棋子类型列表（小写英文）。
+    /// 按型计数可由公开信息推导（初始构成 − 已翻开 − 已阵亡），不泄露暗子身份。
+    pub hidden_red: Vec<String>,
+    /// 黑方未翻开（隐藏）棋子类型列表
+    pub hidden_black: Vec<String>,
     pub legal_actions: Vec<ActionView>,
     pub ai: AiInfoView,
     /// 当前是否轮到 AI 行棋

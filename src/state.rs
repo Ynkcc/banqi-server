@@ -440,6 +440,40 @@ impl GameSession {
             .map(|action| self.action_view(action))
             .collect();
 
+        // 阵亡 / 隐藏棋子列表（按型展开；hidden 计数可由公开信息推导，不泄露暗子身份）
+        use banqi_core::core::env::types::PieceType;
+        let piece_type_names: [String; 7] = [
+            PieceType::Soldier,
+            PieceType::Cannon,
+            PieceType::Horse,
+            PieceType::Chariot,
+            PieceType::Elephant,
+            PieceType::Advisor,
+            PieceType::General,
+        ]
+        .map(piece_type_str);
+        let mut dead_red: Vec<String> = Vec::new();
+        let mut dead_black: Vec<String> = Vec::new();
+        for (player_idx, out) in [(0usize, &mut dead_red), (1, &mut dead_black)] {
+            for t in 0..7 {
+                for _ in 0..snap.dead_counts[player_idx][t] {
+                    out.push(piece_type_names[t].clone());
+                }
+            }
+        }
+        let hidden_red: Vec<String> = snap
+            .hidden_bag
+            .iter()
+            .filter(|p| p.player == banqi_core::core::env::types::Player::Red)
+            .map(|p| piece_type_str(p.piece_type))
+            .collect();
+        let hidden_black: Vec<String> = snap
+            .hidden_bag
+            .iter()
+            .filter(|p| p.player == banqi_core::core::env::types::Player::Black)
+            .map(|p| piece_type_str(p.piece_type))
+            .collect();
+
         let over = terminated || truncated;
         let over_reason = if !over {
             None
@@ -483,6 +517,10 @@ impl GameSession {
             winner: winner_str(winner),
             last_action: (snap.last_action >= 0).then_some(snap.last_action as usize),
             board,
+            dead_red,
+            dead_black,
+            hidden_red,
+            hidden_black,
             legal_actions,
             ai: ai_view,
             ai_to_move: self.ai_to_move(),
