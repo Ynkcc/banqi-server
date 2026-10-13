@@ -62,7 +62,7 @@ pub async fn create_game(
         };
         Some(AiConfig {
             player,
-            mcts_sims: req.mcts_sims.unwrap_or(app.config.default_sims).max(1),
+            mcts_sims: req.mcts_sims.unwrap_or_else(|| app.default_sims()).max(1),
         })
     } else {
         None

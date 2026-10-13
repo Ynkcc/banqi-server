@@ -79,23 +79,15 @@ impl Models {
     /// 单个文件加载失败只告警不阻塞启动。
     pub fn load(models_dir: &Path, sessions: usize, device: &str) -> Self {
         let mut models = Self::default();
-        let entries = match std::fs::read_dir(models_dir) {
-            Ok(e) => e,
-            Err(e) => {
-                tracing::warn!(
-                    "模型目录不可读 ({}): {e}，所有变体 AI 均不可用",
-                    models_dir.display()
-                );
-                return models;
-            }
-        };
-
         // 按文件名排序，保证多模型同维度时的匹配顺序确定
-        let mut paths: Vec<std::path::PathBuf> = entries
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("onnx"))
-            .collect();
+        let mut paths: Vec<std::path::PathBuf> = Vec::new();
+        collect_onnx_files(models_dir, 0, &mut paths);
+        if paths.is_empty() {
+            tracing::warn!(
+                "模型目录未找到任何 .onnx ({}，含子目录)，所有变体 AI 均不可用",
+                models_dir.display()
+            );
+        }
         paths.sort();
 
         for path in paths {
@@ -189,6 +181,30 @@ impl Models {
                 (m.file.clone(), m.stem.clone(), variants)
             })
             .collect()
+    }
+}
+
+/// 递归收集目录下的 `*.onnx`（深度限制 4 层，与 banqi-gui 的模型扫描口径一致）。
+#[cfg(feature = "onnx")]
+fn collect_onnx_files(dir: &Path, depth: usize, out: &mut Vec<std::path::PathBuf>) {
+    if depth > 4 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        if depth == 0 {
+            tracing::warn!("模型目录不可读 ({}), 所有变体 AI 均不可用", dir.display());
+        }
+        return;
+    };
+    for e in entries.flatten() {
+        let path = e.path();
+        match e.file_type() {
+            Ok(ft) if ft.is_dir() => collect_onnx_files(&path, depth + 1, out),
+            Ok(ft) if ft.is_file() && path.extension().and_then(|x| x.to_str()) == Some("onnx") => {
+                out.push(path);
+            }
+            _ => {}
+        }
     }
 }
 
@@ -552,6 +568,10 @@ impl GameSession {
 /// axum 共享状态。
 pub struct AppState {
     pub config: ServerConfig,
+    /// 运行时可调的默认 MCTS 搜索预算（模拟次数）；
+    /// 初始值取 `config.default_sims`，经 `PUT /api/settings` 在线修改，
+    /// 只影响之后创建的对局与手动搜索（已有对局沿用其创建时的 `mcts_sims`）。
+    pub default_sims: std::sync::atomic::AtomicUsize,
     pub models: Models,
     /// 对局存储（std RwLock 即可：所有持锁段均为同步 CPU 操作，不跨 await）
     pub games: RwLock<HashMap<Uuid, GameSession>>,
@@ -564,10 +584,25 @@ impl AppState {
     pub fn new(config: ServerConfig) -> Self {
         let models = Models::load(&config.models_dir, config.sessions, &config.device);
         Self {
+            default_sims: std::sync::atomic::AtomicUsize::new(config.default_sims.max(1)),
             config,
             models,
             games: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// 当前默认 MCTS 搜索预算（原子读取，钳制到至少 1）。
+    pub fn default_sims(&self) -> usize {
+        self.default_sims
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .max(1)
+    }
+
+    /// 运行时调整默认 MCTS 搜索预算，返回钳制后的生效值。
+    pub fn set_default_sims(&self, sims: usize) -> usize {
+        let v = sims.max(1);
+        self.default_sims.store(v, std::sync::atomic::Ordering::Relaxed);
+        v
     }
 
     /// 创建对局的默认变体：--default-variant > 首个有模型者 > 首个变体。

@@ -87,7 +87,7 @@ pub async fn search(
         let s = games
             .get(&game_id)
             .ok_or_else(|| ApiError::GameNotFound(id.clone()))?;
-        let sims = s.ai.as_ref().map(|a| a.mcts_sims).unwrap_or(app.config.default_sims);
+        let sims = s.ai.as_ref().map(|a| a.mcts_sims).unwrap_or_else(|| app.default_sims());
         let model = app
             .models
             .get(s.variant)

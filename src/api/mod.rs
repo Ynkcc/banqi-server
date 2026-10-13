@@ -9,7 +9,7 @@ use axum::{Json, Router};
 
 use banqi_core::core::env::Variant;
 
-use crate::dto::{HealthResp, ModelInfo, VariantInfo, VariantsResp};
+use crate::dto::{HealthResp, ModelInfo, SettingsReq, SettingsResp, VariantInfo, VariantsResp};
 use crate::state::SharedState;
 use crate::web;
 
@@ -27,6 +27,7 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/games/{id}/mcts/node/{node}/board", get(mcts::board))
         .route("/api/health", get(health))
         .route("/api/variants", get(variants))
+        .route("/api/settings", get(get_settings).put(put_settings))
         .with_state(state)
         // 内嵌前端：/api 之外的所有路径走静态资源 + SPA fallback
         .fallback(web::handler)
@@ -68,4 +69,21 @@ async fn variants(State(app): State<SharedState>) -> Json<VariantsResp> {
             })
             .collect(),
     })
+}
+
+/// GET /api/settings：读取运行时可调的服务端设置（当前仅默认 MCTS 搜索预算）。
+async fn get_settings(State(app): State<SharedState>) -> Json<SettingsResp> {
+    Json(SettingsResp {
+        mcts_sims: app.default_sims(),
+    })
+}
+
+/// PUT /api/settings：运行时调整默认 MCTS 搜索预算（只影响之后创建的对局与手动搜索）。
+async fn put_settings(
+    State(app): State<SharedState>,
+    Json(req): Json<SettingsReq>,
+) -> Json<SettingsResp> {
+    let applied = app.set_default_sims(req.mcts_sims);
+    tracing::info!("运行时调整默认 MCTS 搜索预算: {applied}");
+    Json(SettingsResp { mcts_sims: applied })
 }

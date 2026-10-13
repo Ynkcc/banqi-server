@@ -27,7 +27,7 @@ impl Default for ServerConfig {
             models_dir: PathBuf::from("models"),
             sessions: 1,
             device: "cpu".to_string(),
-            default_sims: 128,
+            default_sims: 200,
             default_variant: None,
         }
     }
@@ -42,7 +42,7 @@ impl ServerConfig {
         Ok(cfg)
     }
 
-    /// 环境变量兜底：BANQI_ADDR / BANQI_MODELS_DIR / BANQI_SESSIONS / BANQI_DEVICE / BANQI_DEFAULT_SIMS / BANQI_DEFAULT_VARIANT
+    /// 环境变量兜底：BANQI_ADDR / BANQI_MODELS_DIR / BANQI_SESSIONS / BANQI_DEVICE / BANQI_DEFAULT_VARIANT
     fn from_env() -> Self {
         let mut cfg = Self::default();
         if let Ok(v) = std::env::var("BANQI_ADDR") {
@@ -59,18 +59,14 @@ impl ServerConfig {
         if let Ok(v) = std::env::var("BANQI_DEVICE") {
             cfg.device = v;
         }
-        if let Ok(v) = std::env::var("BANQI_DEFAULT_SIMS") {
-            if let Ok(n) = v.parse() {
-                cfg.default_sims = n;
-            }
-        }
         if let Ok(v) = std::env::var("BANQI_DEFAULT_VARIANT") {
             cfg.default_variant = parse_variant(&v);
         }
         cfg
     }
 
-    /// CLI 参数：--addr / --models-dir / --sessions / --device / --default-sims
+    /// CLI 参数：--addr / --models-dir / --sessions / --device
+    /// （默认模拟次数不再由 CLI 指定，仅运行时经 settings 接口调整）
     fn apply_args<I: Iterator<Item = String>>(&mut self, args: I) -> Result<(), String> {
         let args: Vec<String> = args.collect();
         let mut i = 0;
@@ -95,11 +91,6 @@ impl ServerConfig {
                         .map_err(|_| format!("--sessions 需要正整数，得到: {value}"))?
                 }
                 "--device" => self.device = value,
-                "--default-sims" => {
-                    self.default_sims = value
-                        .parse()
-                        .map_err(|_| format!("--default-sims 需要正整数，得到: {value}"))?
-                }
                 "--default-variant" => {
                     self.default_variant = Some(parse_variant(&value).ok_or_else(|| {
                         format!(
@@ -123,7 +114,7 @@ impl ServerConfig {
             return Err("--sessions 必须至少为 1".to_string());
         }
         if self.default_sims == 0 {
-            return Err("--default-sims 必须至少为 1".to_string());
+            return Err("default_sims 必须至少为 1".to_string());
         }
         Ok(())
     }
@@ -135,7 +126,6 @@ impl ServerConfig {
          \x20   --models-dir <DIR>          ONNX 模型目录（默认 models，env BANQI_MODELS_DIR）\n\
          \x20   --sessions <N>              ONNX 会话池大小（默认 1，env BANQI_SESSIONS）\n\
          \x20   --device <DEV>              cpu|cuda|auto（默认 cpu，env BANQI_DEVICE）\n\
-         \x20   --default-sims <N>          默认 MCTS 模拟次数（默认 128，env BANQI_DEFAULT_SIMS）\n\
          \x20   --default-variant <ID>      默认对局变体（env BANQI_DEFAULT_VARIANT；\n\
          \x20                               缺省时取首个有模型者，再退回首个变体）"
             .to_string()

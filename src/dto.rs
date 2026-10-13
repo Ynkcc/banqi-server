@@ -18,9 +18,16 @@ pub struct CreateGameReq {
     /// AI 执子方："red" / "black" / "auto"（默认 "auto" = AI 执黑，人类执红先行）
     #[serde(default)]
     pub ai_player: Option<String>,
-    /// MCTS 模拟次数（默认取服务器 --default-sims）
+    /// MCTS 模拟次数（缺省取服务器当前默认值，可运行时经 PUT /api/settings 调整）
     #[serde(default)]
     pub mcts_sims: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsReq {
+    /// 默认 MCTS 搜索预算（模拟次数，运行时生效；至少 1）
+    pub mcts_sims: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -234,6 +241,13 @@ pub struct VariantInfo {
 #[serde(rename_all = "camelCase")]
 pub struct VariantsResp {
     pub variants: Vec<VariantInfo>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsResp {
+    /// 当前默认 MCTS 搜索预算（模拟次数）
+    pub mcts_sims: usize,
 }
 
 #[derive(Debug, Serialize)]
