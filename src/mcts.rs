@@ -82,9 +82,10 @@ pub struct MctsNodeDetail {
 /// 节点局面视图（snake_case，前端 `GameState` 的信息子集；暗子不泄露身份）。
 #[derive(Debug, Clone, Serialize)]
 pub struct MctsBoardState {
-    /// banqi-core `Slot` 的 serde 序列化（"Empty" / "Hidden" / "R_Sol" 等），
-    /// 与 Tauri 后端直出的 GameState.board 同构。
-    pub board: Vec<banqi_core::core::env::types::Slot>,
+    /// banqi-core `Slot` 转字符串后的棋盘（"Empty" / "Hidden" / "R_Sol" 等），
+    /// 与 Tauri 后端 extract_game_state 直出的 GameState.board 同构
+    /// （Slot 直接 serde 序列化是 tagged 枚举，前端无法识别，故必须转字符串）。
+    pub board: Vec<String>,
     /// "Red" / "Black"
     pub current_player: String,
     pub move_counter: u32,
@@ -274,7 +275,15 @@ impl<G: GameEnv + SnapshotEnv> MctsTreeView for MctsTree<G> {
             .and_then(|a| variant::coords_for_action(snap.variant, a))
             .unwrap_or_default();
         let state = MctsBoardState {
-            board: snap.slots.clone(),
+            board: snap
+                .slots
+                .iter()
+                .map(|slot| match slot {
+                    banqi_core::core::env::types::Slot::Empty => "Empty".to_string(),
+                    banqi_core::core::env::types::Slot::Hidden => "Hidden".to_string(),
+                    banqi_core::core::env::types::Slot::Revealed(p) => p.short_name(),
+                })
+                .collect(),
             current_player: player_label(snap.current_player),
             move_counter: snap.move_counter,
             total_step_counter: snap.total_step_counter,
