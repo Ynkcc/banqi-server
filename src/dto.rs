@@ -143,11 +143,42 @@ pub struct GameStateResp {
     /// 黑方未翻开（隐藏）棋子类型列表
     pub hidden_black: Vec<String>,
     pub legal_actions: Vec<ActionView>,
+    /// 决策历史（棋谱）：每手棋的实际执行结果，含翻棋/吃暗子翻出的真实棋子。
+    /// 悔棋后同步截断；重开对局清空。
+    pub history: Vec<HistoryMoveView>,
     pub ai: AiInfoView,
     /// 当前是否轮到 AI 行棋
     pub ai_to_move: bool,
     /// 当前是否可悔棋（当前行棋方存在更早的行动快照且对局未结束）
     pub undoable: bool,
+}
+
+/// 一手棋的决策记录视图（对局历史查询 / 棋谱展示）。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryMoveView {
+    /// 手数（1 起，对局内单调递增）
+    pub ply: usize,
+    /// 行棋方："red" / "black"
+    pub player: String,
+    /// 动作空间索引
+    pub action: usize,
+    /// 源格索引（翻棋时 == to）
+    pub from: usize,
+    /// 目标格索引
+    pub to: usize,
+    /// 纯翻棋
+    pub is_flip: bool,
+    /// 机会动作（翻棋 / 吃暗子，结果有随机性）
+    pub is_chance: bool,
+    /// 吃明子（目标是对方已翻开的明子）
+    pub is_capture: bool,
+    /// 机会动作实际翻出的棋子（翻棋 = 翻出的子；吃暗子含炮打暗子 = 打出的子）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revealed: Option<PieceView>,
+    /// 被消灭的棋子（吃明子的被吃子；吃暗子时 == revealed）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub captured: Option<PieceView>,
 }
 
 #[derive(Debug, Serialize)]

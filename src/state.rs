@@ -14,14 +14,14 @@ use uuid::Uuid;
 
 use banqi_core::core::env::error::EnvError;
 use banqi_core::core::env::types::Player;
-use banqi_core::core::env::{GameEnv, MoveHistory, PositionSnapshot, SnapshotEnv, Variant};
+use banqi_core::core::env::{GameEnv, MoveHistory, MoveRecord, PositionSnapshot, SnapshotEnv, Variant};
 #[cfg(feature = "onnx")]
 use banqi_engine::inference::onnx::OnnxModel;
 
 use crate::config::ServerConfig;
 use crate::dto::{
-    ActionView, AiInfoView, CellView, GameStateResp, PieceView, piece_type_str, player_str,
-    winner_str,
+    ActionView, AiInfoView, CellView, GameStateResp, HistoryMoveView, PieceView, piece_type_str,
+    player_str, winner_str,
 };
 use crate::error::ApiError;
 use crate::variant;
@@ -321,7 +321,7 @@ impl GameSession {
             .expect("快照由本服务生成，重建不应失败")
     }
 
-    /// 应用动作（校验终局与合法性；维护快照栈与版本号）。
+    /// 应用动作（校验终局与合法性；维护快照栈、决策历史与版本号）。
     pub fn apply_action(&mut self, action: usize) -> Result<variant::StepOutcome, ApiError> {
         if self.is_over() {
             return Err(ApiError::GameOver);
@@ -330,13 +330,17 @@ impl GameSession {
         if !legal.contains(&action) {
             return Err(ApiError::IllegalAction { action });
         }
-        self.history.push(self.current.clone());
+        let prev = self.current.clone();
+        self.history.push(prev.clone());
         // 合法性已预检，step 失败只可能是内部不变量问题
-        let (outcome, snap) = with_env!(self.variant, &self.current, env => {
+        let (outcome, snap, revealed) = with_env!(self.variant, &self.current, env => {
             let o = variant::step(&mut env, action).expect("动作已通过合法性与终局预检");
-            (o, env.to_snapshot())
+            // 本步实际翻出的棋子（翻棋/吃暗子的真实结果，快照差分推不出）
+            let revealed = GameEnv::last_revealed(&env);
+            (o, env.to_snapshot(), revealed)
         })
         .map_err(|e: EnvError| ApiError::Internal(format!("重建环境失败: {e}")))?;
+        self.history.record(MoveRecord::from_step(&prev, &snap, action, revealed));
         self.current = snap;
         self.version += 1;
         Ok(outcome)
@@ -514,6 +518,36 @@ impl GameSession {
             },
         };
 
+        // 决策历史（棋谱）：机会动作附实际翻出的棋子
+        let history: Vec<HistoryMoveView> = self
+            .history
+            .records()
+            .iter()
+            .enumerate()
+            .map(|(i, rec)| HistoryMoveView {
+                ply: i + 1,
+                player: player_str(rec.player),
+                action: rec.action,
+                from: rec.from,
+                to: rec.to,
+                is_flip: rec.is_flip,
+                is_chance: rec.is_chance,
+                is_capture: rec.is_capture,
+                revealed: rec
+                    .revealed
+                    .map(|p| PieceView {
+                        piece_type: piece_type_str(p.piece_type),
+                        side: player_str(p.player),
+                    }),
+                captured: rec
+                    .captured
+                    .map(|p| PieceView {
+                        piece_type: piece_type_str(p.piece_type),
+                        side: player_str(p.player),
+                    }),
+            })
+            .collect();
+
         GameStateResp {
             game_id: game_id.to_string(),
             variant: self.variant.as_str().to_string(),
@@ -538,6 +572,7 @@ impl GameSession {
             hidden_red,
             hidden_black,
             legal_actions,
+            history,
             ai: ai_view,
             ai_to_move: self.ai_to_move(),
             undoable: self.undoable(),
