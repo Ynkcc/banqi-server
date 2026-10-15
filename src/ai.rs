@@ -41,10 +41,12 @@ pub(crate) async fn choose_blocking(
                 let config = GumbelConfig::with_search_scale(sims.max(1), 16);
                 let mut mcts = banqi_core::core::mcts::GumbelMCTS::new(&env, &evaluator, config);
                 let pre_visits = mcts.arena.get(mcts.root_idx).visit_count;
+                let started = std::time::Instant::now();
                 let result = mcts
                     .run()
                     .map_err(|e| format!("MCTS+ONNX 决策失败: {e}"))?
                     .ok_or_else(|| "MCTS 未返回动作（无合法动作）".to_string())?;
+                let elapsed_ms = started.elapsed().as_millis() as u64;
                 let (max_depth, nodes) = tree_stats(&mcts.arena, mcts.root_idx);
                 let stats = mcts::MctsSearchStats {
                     reused: false,
@@ -52,6 +54,7 @@ pub(crate) async fn choose_blocking(
                     actual_sims: result.root_visit_count.saturating_sub(pre_visits),
                     max_depth,
                     nodes,
+                    elapsed_ms,
                 };
                 let tree: MctsTree<E> = MctsTree {
                     arena: mcts.arena,

@@ -39,6 +39,8 @@ pub struct MctsSearchStats {
     pub actual_sims: u32,
     pub max_depth: usize,
     pub nodes: usize,
+    /// 搜索本体（`mcts.run()`）耗时（毫秒）
+    pub elapsed_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]

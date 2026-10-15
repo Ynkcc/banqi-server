@@ -198,6 +198,8 @@ pub struct MctsStatsDto {
     pub actual_sims: u32,
     pub max_depth: usize,
     pub nodes: usize,
+    /// 搜索本体（`mcts.run()`）耗时（毫秒）
+    pub elapsed_ms: u64,
 }
 
 impl MctsStatsDto {
@@ -210,6 +212,7 @@ impl MctsStatsDto {
             actual_sims: stats.actual_sims,
             max_depth: stats.max_depth,
             nodes: stats.nodes,
+            elapsed_ms: stats.elapsed_ms,
         })
     }
 }
