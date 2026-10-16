@@ -278,8 +278,12 @@ impl Models {
 pub struct AiConfig {
     /// AI 执子方
     pub player: Player,
-    /// 每次决策的 MCTS 模拟次数
+    /// 每次决策的 MCTS 模拟次数。
+    /// `follows_default = true` 时跟随服务器默认（`PUT /api/settings` 实时
+    /// 同步到进行中的对局）；创建请求显式指定 `mctsSims` 后固定不变。
     pub mcts_sims: usize,
+    /// 是否跟随服务器默认搜索预算（创建对局未显式指定 `mctsSims` 时为 true）
+    pub follows_default: bool,
 }
 
 /// 单局状态：变体 + 当前快照 + 快照栈（悔棋）+ AI 配置 + 版本号。
@@ -604,8 +608,9 @@ impl GameSession {
 pub struct AppState {
     pub config: ServerConfig,
     /// 运行时可调的默认 MCTS 搜索预算（模拟次数）；
-    /// 初始值取 `config.default_sims`，经 `PUT /api/settings` 在线修改，
-    /// 只影响之后创建的对局与手动搜索（已有对局沿用其创建时的 `mcts_sims`）。
+    /// 初始值取 `config.default_sims`，经 `PUT /api/settings` 在线修改：
+    /// 之后创建的对局取新值；进行中的「跟随默认」对局实时同步
+    /// （显式指定 `mctsSims` 的对局不受影响）。
     pub default_sims: std::sync::atomic::AtomicUsize,
     pub models: Models,
     /// 对局存储（std RwLock 即可：所有持锁段均为同步 CPU 操作，不跨 await）
@@ -634,9 +639,20 @@ impl AppState {
     }
 
     /// 运行时调整默认 MCTS 搜索预算，返回钳制后的生效值。
+    ///
+    /// 同步所有「跟随默认」的对局（创建时未显式指定 `mctsSims`），
+    /// 使运行时调整对**进行中的对局**实时生效；显式指定的对局不受影响。
     pub fn set_default_sims(&self, sims: usize) -> usize {
         let v = sims.max(1);
         self.default_sims.store(v, std::sync::atomic::Ordering::Relaxed);
+        let mut games = self.games.write().expect("games 锁中毒");
+        for session in games.values_mut() {
+            if let Some(ai) = &mut session.ai
+                && ai.follows_default
+            {
+                ai.mcts_sims = v;
+            }
+        }
         v
     }
 
@@ -650,5 +666,75 @@ impl AppState {
             .first()
             .copied()
             .unwrap_or(Variant::ALL[0])
+    }
+}
+
+// ============================================================================
+// 测试
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::ServerConfig;
+    use banqi_core::core::env::Variant;
+
+    fn test_app() -> AppState {
+        // models_dir 指向不存在的临时路径：模型池为空（仅告警），测试不加载 ONNX
+        let cfg = ServerConfig {
+            models_dir: std::env::temp_dir().join("banqi-server-test-no-models"),
+            ..Default::default()
+        };
+        AppState::new(cfg)
+    }
+
+    fn session_with_ai(mcts_sims: usize, follows_default: bool) -> GameSession {
+        GameSession::new(
+            Variant::DarkChess4x8,
+            Some(AiConfig {
+                player: Player::Black,
+                mcts_sims,
+                follows_default,
+            }),
+        )
+    }
+
+    #[test]
+    fn set_default_sims_syncs_follow_default_games_only() {
+        let app = test_app();
+        let id_follow = Uuid::new_v4();
+        let id_explicit = Uuid::new_v4();
+        {
+            let mut games = app.games.write().expect("games 锁中毒");
+            games.insert(id_follow, session_with_ai(200, true));
+            games.insert(id_explicit, session_with_ai(77, false));
+        }
+
+        let applied = app.set_default_sims(400);
+        assert_eq!(applied, 400);
+        assert_eq!(app.default_sims(), 400);
+
+        let games = app.games.read().expect("games 锁中毒");
+        assert_eq!(
+            games[&id_follow].ai.as_ref().unwrap().mcts_sims,
+            400,
+            "跟随默认的对局应实时同步新预算"
+        );
+        assert!(
+            games[&id_follow].ai.as_ref().unwrap().follows_default,
+            "跟随标记不得被同步修改"
+        );
+        assert_eq!(
+            games[&id_explicit].ai.as_ref().unwrap().mcts_sims,
+            77,
+            "显式指定的对局不受运行时调整影响"
+        );
+    }
+
+    #[test]
+    fn set_default_sims_clamps_to_at_least_one() {
+        let app = test_app();
+        assert_eq!(app.set_default_sims(0), 1);
+        assert_eq!(app.default_sims(), 1);
     }
 }

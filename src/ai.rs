@@ -38,7 +38,7 @@ pub(crate) async fn choose_blocking(
         with_env!(variant, &snap, env => {
             (|| -> Result<Option<(usize, MctsTreeBox)>, String> {
                 let evaluator = OnnxEvaluator::<E>::new(model.clone());
-                let config = GumbelConfig::with_search_scale(sims.max(1), 16);
+                let config = GumbelConfig::for_play(sims);
                 let mut mcts = banqi_core::core::mcts::GumbelMCTS::new(&env, &evaluator, config);
                 let pre_visits = mcts.arena.get(mcts.root_idx).visit_count;
                 let started = std::time::Instant::now();

@@ -62,7 +62,12 @@ pub async fn create_game(
         };
         Some(AiConfig {
             player,
-            mcts_sims: req.mcts_sims.unwrap_or_else(|| app.default_sims()).max(1),
+            // 未显式指定 → 跟随服务器默认（PUT /api/settings 实时同步到本对局）
+            mcts_sims: match req.mcts_sims {
+                Some(v) => v.max(1),
+                None => app.default_sims(),
+            },
+            follows_default: req.mcts_sims.is_none(),
         })
     } else {
         None

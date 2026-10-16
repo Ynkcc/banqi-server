@@ -18,7 +18,8 @@ pub struct CreateGameReq {
     /// AI 执子方："red" / "black" / "auto"（默认 "auto" = AI 执黑，人类执红先行）
     #[serde(default)]
     pub ai_player: Option<String>,
-    /// MCTS 模拟次数（缺省取服务器当前默认值，可运行时经 PUT /api/settings 调整）
+    /// MCTS 模拟次数；缺省时跟随服务器当前默认值（此后经 PUT /api/settings
+    /// 调整会实时同步到本对局），显式指定后固定不变
     #[serde(default)]
     pub mcts_sims: Option<usize>,
 }

@@ -78,7 +78,8 @@ async fn get_settings(State(app): State<SharedState>) -> Json<SettingsResp> {
     })
 }
 
-/// PUT /api/settings：运行时调整默认 MCTS 搜索预算（只影响之后创建的对局与手动搜索）。
+/// PUT /api/settings：运行时调整默认 MCTS 搜索预算（进行中的「跟随默认」
+/// 对局实时同步；显式指定 `mctsSims` 的对局不受影响）。
 async fn put_settings(
     State(app): State<SharedState>,
     Json(req): Json<SettingsReq>,
