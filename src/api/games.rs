@@ -11,7 +11,7 @@ use crate::ai;
 use crate::config::parse_variant;
 use crate::dto::{
     AppliedAction, CreateGameReq, GameCreatedResp, GameListResp, GameStateResp, GameSummary,
-    MoveReq, MoveResp, UndoReq, player_str,
+    ModelBindReq, MoveReq, MoveResp, UndoReq, player_str,
 };
 use crate::error::ApiError;
 use crate::state::{AiConfig, GameSession, SharedState};
@@ -43,13 +43,30 @@ pub async fn create_game(
     };
 
     let ai_enabled = req.ai_enabled.unwrap_or(true);
+    // 模型加载与对局绑定：AI 对局必须显式指定模型文件（用户从
+    // GET /api/health 的模型清单中选择）；不做变体预判，形状不匹配
+    // 由推理时 ort 忠实报错。建局即加载（随用随加载），坏文件在此报错。
+    #[cfg(not(feature = "onnx"))]
+    if ai_enabled {
+        return Err(ApiError::ModelUnavailable(
+            "服务编译未启用 onnx 推理，AI 对手不可用".into(),
+        ));
+    }
+    let model_file = if ai_enabled {
+        Some(req.model_file.clone().filter(|s| !s.is_empty()).ok_or_else(|| {
+            ApiError::BadRequest(
+                "启用 AI 需显式指定 modelFile（从 GET /api/health 的模型清单中选择）".into(),
+            )
+        })?)
+    } else {
+        None
+    };
     let ai = if ai_enabled {
-        if !app.models.available(variant) {
-            return Err(ApiError::ModelUnavailable(format!(
-                "变体 {} 无已加载模型，无法启用 AI（检查 models/ 目录命名：<变体ID>.onnx）",
-                variant.as_str()
-            )));
-        }
+        // 建局即加载：坏模型在建局时报错而非对局中途；加载后常驻缓存供 AI 回合复用
+        #[cfg(feature = "onnx")]
+        app.acquire_model(model_file.clone().expect("AI 对局必有模型文件"))
+            .await
+            .map_err(|e| ApiError::ModelUnavailable(format!("模型加载失败: {e}")))?;
         let player = match req.ai_player.as_deref() {
             None | Some("auto") => Player::Black, // 默认 AI 执黑，人类执红先行
             Some("red") => Player::Red,
@@ -62,26 +79,28 @@ pub async fn create_game(
         };
         Some(AiConfig {
             player,
-            // 未显式指定 → 跟随服务器默认（PUT /api/settings 实时同步到本对局）
-            mcts_sims: match req.mcts_sims {
-                Some(v) => v.max(1),
-                None => app.default_sims(),
-            },
-            follows_default: req.mcts_sims.is_none(),
+            // 建局时快照固定；未显式指定取服务器当前默认值
+            mcts_sims: req.mcts_sims.unwrap_or_else(|| app.default_sims()).max(1),
         })
     } else {
         None
     };
 
     let game_id = Uuid::new_v4();
-    let session = GameSession::new(variant, ai);
+    let session = GameSession::new(variant, ai, model_file);
     let state = session.view(game_id);
 
     app.games
         .write()
         .expect("games 锁中毒")
         .insert(game_id, session);
-    tracing::info!(game = %game_id, "创建对局: variant={}，ai={:?}", variant.as_str(), ai.is_some());
+    tracing::info!(
+        game = %game_id,
+        "创建对局: variant={}，ai={:?}，model={:?}",
+        variant.as_str(),
+        ai.is_some(),
+        req.model_file
+    );
 
     Ok(Json(GameCreatedResp {
         game_id: game_id.to_string(),
@@ -222,6 +241,41 @@ pub async fn ai_move(
             "AI 结果作废（期间对局被并发修改），请重试".to_string(),
         )),
     }
+}
+
+/// PUT /api/games/:id/model
+///
+/// 为进行中的对局重新绑定（并预加载）用户选择的模型文件。
+/// 此后该对局的 AI 回合与手动搜索均使用该模型。
+pub async fn bind_model(
+    State(app): State<SharedState>,
+    Path(id): Path<String>,
+    Json(req): Json<ModelBindReq>,
+) -> Result<Json<GameStateResp>, ApiError> {
+    let game_id = parse_game_id(&id)?;
+
+    // 锁 1：校验 AI 已启用（立即释放）
+    {
+        let games = app.games.read().expect("games 锁中毒");
+        let s = games
+            .get(&game_id)
+            .ok_or_else(|| ApiError::GameNotFound(id.clone()))?;
+        s.ai.as_ref().ok_or(ApiError::AiDisabled)?;
+    }
+
+    // 锁外预加载（blocking 线程池，可能耗时；坏文件在此报错）
+    app.acquire_model(req.model_file.clone())
+        .await
+        .map_err(|e| ApiError::ModelUnavailable(format!("模型 {} 绑定失败: {e}", req.model_file)))?;
+
+    // 锁 2：写入绑定
+    let mut games = app.games.write().expect("games 锁中毒");
+    let s = games
+        .get_mut(&game_id)
+        .ok_or_else(|| ApiError::GameNotFound(id.clone()))?;
+    s.model_file = Some(req.model_file.clone());
+    tracing::info!(game = %game_id, "对局重绑模型: {}", req.model_file);
+    Ok(Json(s.view(game_id)))
 }
 
 /// POST /api/games/:id/undo

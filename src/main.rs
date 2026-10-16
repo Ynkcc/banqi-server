@@ -43,15 +43,10 @@ async fn main() {
     let addr = config.addr.clone();
     let app_state = Arc::new(AppState::new(config));
 
-    let loaded: Vec<String> = app_state
-        .models
-        .loaded_variants()
-        .iter()
-        .map(|v| v.as_str().to_string())
-        .collect();
+    let files = app_state.models.files();
     tracing::info!(
-        "模型加载完成: {}（会话池 {}，device {}）",
-        if loaded.is_empty() { "无".to_string() } else { loaded.join(", ") },
+        "模型目录扫描完成: {} 个模型文件（随用随加载：对局绑定的文件首次使用时才加载；会话池 {}，device {}）",
+        files.len(),
         app_state.config.sessions,
         app_state.config.device
     );

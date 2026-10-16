@@ -22,6 +22,18 @@ pub struct CreateGameReq {
     /// 调整会实时同步到本对局），显式指定后固定不变
     #[serde(default)]
     pub mcts_sims: Option<usize>,
+    /// 显式绑定的模型文件（用户从 /api/health 模型清单中选择；须在模型目录内）。
+    /// 缺省自动匹配；同变体存在多个候选模型时自动匹配报歧义错误，必须显式指定。
+    #[serde(default)]
+    pub model_file: Option<String>,
+}
+
+/// PUT /api/games/:id/model：为进行中的对局重新绑定模型文件。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelBindReq {
+    /// 模型文件路径（须为模型目录内已扫描到的 .onnx）
+    pub model_file: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -268,8 +280,6 @@ pub struct VariantInfo {
     pub cols: usize,
     pub initial_health: i32,
     pub max_consecutive_moves_for_draw: usize,
-    /// 是否有已加载的模型（AI 可用）
-    pub ai_available: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -288,12 +298,10 @@ pub struct SettingsResp {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelInfo {
-    /// 模型文件路径
+    /// 模型文件路径（创建对局 / 绑定模型时作为 modelFile 使用）
     pub file: String,
-    /// 文件名 stem（仅提示用途）
-    pub stem: String,
-    /// 按输入维度匹配到的变体 ID 列表
-    pub variants: Vec<String>,
+    /// 是否已加载到内存（随用随加载：未加载仅表示尚无对局使用过它）
+    pub loaded: bool,
 }
 
 #[derive(Debug, Serialize)]

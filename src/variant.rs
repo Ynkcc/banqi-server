@@ -101,17 +101,3 @@ pub fn coords_for_action(variant: Variant, action: usize) -> Option<Vec<usize>> 
         .get(action)
         .cloned()
 }
-
-/// 变体的模型输入特征维度：`(channels, rows, cols, scalars)`。
-///
-/// 用于加载期校验 ONNX 模型与变体的维度契约（board[B,C,H,W] + scalars[B,S]）。
-#[cfg(feature = "onnx")]
-pub fn feature_dims(variant: Variant) -> (usize, usize, usize, usize) {
-    let cfg = variant.config();
-    (
-        cfg.resnet_board_channels,
-        cfg.rows,
-        cfg.cols,
-        cfg.resnet_scalar_feature_count,
-    )
-}

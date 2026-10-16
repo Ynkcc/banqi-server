@@ -82,19 +82,26 @@ pub async fn search(
     let game_id = Uuid::parse_str(&id).map_err(|_| ApiError::BadRequest(format!("非法对局 ID: {id}")))?;
 
     // 锁 1：读取搜索所需数据（立即释放，不跨 await）
-    let (variant, snap, model, sims) = {
+    let (variant, snap, sims, model_file) = {
         let games = app.games.read().expect("games 锁中毒");
         let s = games
             .get(&game_id)
             .ok_or_else(|| ApiError::GameNotFound(id.clone()))?;
         let sims = s.ai.as_ref().map(|a| a.mcts_sims).unwrap_or_else(|| app.default_sims());
-        let model = app
-            .models
-            .get(s.variant)
-            .cloned()
-            .ok_or_else(|| ApiError::ModelUnavailable(format!("变体 {} 无已加载模型", s.variant.as_str())))?;
-        (s.variant, s.current.clone(), model, sims)
+        let model_file = s.model_file.clone().ok_or_else(|| {
+            ApiError::BadRequest(
+                "对局未绑定模型文件，无法执行搜索（创建对局时指定 modelFile 或 PUT /api/games/:id/model 绑定）"
+                    .into(),
+            )
+        })?;
+        (s.variant, s.current.clone(), sims, model_file)
     };
+
+    // 锁外取对局绑定的模型（随用随加载：缓存命中直接返回，首次使用时加载）
+    let model = app
+        .acquire_model(model_file)
+        .await
+        .map_err(ApiError::ModelUnavailable)?;
 
     let (_action, tree) = crate::ai::choose_blocking(variant, snap, model, sims)
         .await

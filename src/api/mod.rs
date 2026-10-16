@@ -4,7 +4,7 @@ pub mod games;
 pub mod mcts;
 
 use axum::extract::State;
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 
 use banqi_core::core::env::Variant;
@@ -20,6 +20,7 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/games/{id}/move", post(games::move_piece))
         .route("/api/games/{id}/ai-move", post(games::ai_move))
         .route("/api/games/{id}/undo", post(games::undo))
+        .route("/api/games/{id}/model", put(games::bind_model))
         .route("/api/games/{id}/mcts/root", get(mcts::root))
         .route("/api/games/{id}/mcts/search", post(mcts::search))
         .route("/api/games/{id}/mcts/node/{node}", get(mcts::detail))
@@ -33,13 +34,13 @@ pub fn router(state: SharedState) -> Router {
         .fallback(web::handler)
 }
 
-/// GET /api/health：健康检查（含已加载模型及其匹配变体）。
+/// GET /api/health：健康检查（含扫描到的模型文件与加载状态）。
 async fn health(State(app): State<SharedState>) -> Json<HealthResp> {
     let models = app
         .models
         .loaded_files()
         .into_iter()
-        .map(|(file, stem, variants)| ModelInfo { file, stem, variants })
+        .map(|(file, loaded)| ModelInfo { file, loaded })
         .collect();
     Json(HealthResp {
         ok: true,
@@ -49,8 +50,8 @@ async fn health(State(app): State<SharedState>) -> Json<HealthResp> {
     })
 }
 
-/// GET /api/variants：动态列出全部变体元信息及 AI 可用性（零硬编码）。
-async fn variants(State(app): State<SharedState>) -> Json<VariantsResp> {
+/// GET /api/variants：动态列出全部变体元信息（零硬编码）。
+async fn variants() -> Json<VariantsResp> {
     Json(VariantsResp {
         variants: Variant::ALL
             .iter()
@@ -64,7 +65,6 @@ async fn variants(State(app): State<SharedState>) -> Json<VariantsResp> {
                     cols: cfg.cols,
                     initial_health: cfg.initial_health,
                     max_consecutive_moves_for_draw: cfg.max_consecutive_moves_for_draw,
-                    ai_available: app.models.available(v),
                 }
             })
             .collect(),

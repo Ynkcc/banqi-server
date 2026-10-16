@@ -87,7 +87,7 @@ pub async fn run_ai_turn(
     expect_version: u64,
 ) -> Result<Option<(GameStateResp, AppliedAction, Option<crate::dto::MctsStatsDto>)>, ApiError> {
     // 锁 1：校验状态并取出决策所需数据，立即释放（不跨 await）
-    let (variant, snap, model, sims) = {
+    let (variant, snap, sims, model_file) = {
         let games = app.games.read().expect("games 锁中毒");
         let s = games
             .get(&game_id)
@@ -105,13 +105,19 @@ pub async fn run_ai_turn(
                 s.version
             )));
         }
-        let model = app
-            .models
-            .get(s.variant)
-            .cloned()
-            .ok_or_else(|| ApiError::ModelUnavailable(format!("变体 {} 无已加载模型", s.variant.as_str())))?;
-        (s.variant, s.current.clone(), model, ai.mcts_sims)
+        let model_file = s
+            .model_file
+            .clone()
+            .ok_or_else(|| ApiError::BadRequest("对局未绑定模型文件".into()))?;
+        (s.variant, s.current.clone(), ai.mcts_sims, model_file)
     };
+
+    // 锁外取对局绑定的模型（随用随加载：缓存命中直接返回，首次使用时在
+    // blocking 线程池加载）
+    let model = app
+        .acquire_model(model_file)
+        .await
+        .map_err(ApiError::ModelUnavailable)?;
 
     // 锁外推理（blocking 线程池）
     let Some((action, tree)) = choose_blocking(variant, snap, model, sims)

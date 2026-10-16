@@ -1,4 +1,4 @@
-//! 应用状态：模型池（按变体）、对局存储与会话（快照栈 / 版本号 / AI 配置）。
+//! 应用状态：模型池（按变体，随用随加载）、对局存储与会话（快照栈 / 版本号 / AI 配置）。
 //!
 //! 会话不持有具体环境类型：`GameSession` 只存 `Variant` + `PositionSnapshot`
 //! （完整快照：棋盘/行棋方/血量/步数/暗子袋/阵亡计数），所有环境操作经
@@ -7,8 +7,10 @@
 use std::collections::HashMap;
 use std::path::Path;
 #[cfg(feature = "onnx")]
+use std::path::PathBuf;
+#[cfg(feature = "onnx")]
 use std::sync::Arc;
-use std::sync::RwLock;
+use std::sync::{Mutex, RwLock};
 
 use uuid::Uuid;
 
@@ -27,159 +29,97 @@ use crate::error::ApiError;
 use crate::variant;
 
 // ============================================================================
-// ONNX 模型池（启动时动态扫描 models 目录，按输入维度自动关联变体）
+// ONNX 模型池：只提供「文件清单 + 按路径加载缓存」。
+//
+// 不做任何变体关联：不要求文件命名、不预判模型所属变体、无默认兜底。
+// 用户在前端自行选择模型文件并与对局绑定（`GameSession.model_file`）；
+// 输入维度不匹配不做预校验，推理时由 ort 忠实返回形状错误。
 // ============================================================================
 
-/// 模型输入静态维度（board 尾三维 `[C,H,W]` 与 scalars 尾一维 `[S]`；
-/// `None` = 动态维度，匹配时视为通配）。
+/// 模型池：启动只**扫描**模型目录得到文件清单（不加载权重）；
+/// 按文件路径随用随加载并**常驻缓存**，供所有对局复用。
 #[cfg(feature = "onnx")]
-#[derive(Clone, Copy, Debug)]
-pub struct ModelDims {
-    pub board: [Option<usize>; 3],
-    pub scalars: Option<usize>,
-}
-
-#[cfg(feature = "onnx")]
-impl ModelDims {
-    /// 是否与变体特征维度匹配（board[B,C,H,W] + scalars[B,S]，batch 维不参与）。
-    fn matches_variant(&self, variant: Variant) -> bool {
-        let (c, r, w, s) = variant::feature_dims(variant);
-        let ok = |got: Option<usize>, want: usize| got.is_none_or(|g| g == want);
-        ok(self.board[0], c)
-            && ok(self.board[1], r)
-            && ok(self.board[2], w)
-            && ok(self.scalars, s)
-    }
-}
-
-/// 已加载的单个模型文件。
-#[cfg(feature = "onnx")]
-pub struct LoadedModel {
-    pub file: String,
-    /// 文件名 stem（仅作为同维度多模型时的优先提示，不做变体 ID 校验）
-    pub stem: String,
-    pub model: Arc<OnnxModel>,
-    /// 输入静态维度（元数据读取失败时为 None，此时该模型无法按维度关联变体）
-    pub dims: Option<ModelDims>,
-}
-
-/// 已加载模型池。
-#[cfg(feature = "onnx")]
-#[derive(Default)]
 pub struct Models {
-    inner: Vec<LoadedModel>,
+    /// 扫描到的模型文件清单（`rescan` 刷新）
+    files: Mutex<Vec<String>>,
+    /// 已加载模型缓存（key = 文件路径）。加载持锁串行化：并发首用同一文件只加载一次。
+    loaded: Mutex<HashMap<String, Arc<OnnxModel>>>,
+    models_dir: PathBuf,
+    sessions: usize,
+    device: String,
 }
 
 #[cfg(feature = "onnx")]
 impl Models {
-    /// 扫描 `models_dir` 下全部 `*.onnx` 并加载。**不要求文件名是变体 ID**：
-    /// 模型与变体的关联按输入维度自动匹配（`ModelDims::matches_variant`），
-    /// 文件名仅在同维度多模型时作为优先提示。
-    ///
-    /// 单个文件加载失败只告警不阻塞启动。
-    pub fn load(models_dir: &Path, sessions: usize, device: &str) -> Self {
-        let mut models = Self::default();
-        // 按文件名排序，保证多模型同维度时的匹配顺序确定
-        let mut paths: Vec<std::path::PathBuf> = Vec::new();
-        collect_onnx_files(models_dir, 0, &mut paths);
-        if paths.is_empty() {
-            tracing::warn!(
-                "模型目录未找到任何 .onnx ({}，含子目录)，所有变体 AI 均不可用",
-                models_dir.display()
-            );
-        }
-        paths.sort();
-
-        for path in paths {
-            let file = path.to_string_lossy().to_string();
-            let stem = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or_default()
-                .to_string();
-            match OnnxModel::with_sessions(&file, device, sessions) {
-                Ok(model) => {
-                    let dims = read_input_dims(&file);
-                    match dims.as_ref() {
-                        Some(d) => {
-                            let matched: Vec<&str> = Variant::ALL
-                                .iter()
-                                .copied()
-                                .filter(|v| d.matches_variant(*v))
-                                .map(|v| v.as_str())
-                                .collect();
-                            tracing::info!(
-                                "已加载 ONNX 模型: {file}（匹配变体: [{}]，会话池 {sessions}，device={device}）",
-                                if matched.is_empty() { "无".to_string() } else { matched.join(", ") }
-                            );
-                            if matched.is_empty() {
-                                tracing::warn!("模型 {file} 的输入维度与任何变体都不匹配，AI 不会使用它");
-                            }
-                        }
-                        None => {
-                            tracing::info!(
-                                "已加载 ONNX 模型: {file}（输入维度不可静态解析，仅同名文件可关联变体）"
-                            );
-                        }
-                    }
-                    models.inner.push(LoadedModel {
-                        file,
-                        stem,
-                        model: Arc::new(model),
-                        dims,
-                    });
-                }
-                Err(e) => {
-                    tracing::error!("加载 ONNX 模型失败 ({file}): {e}");
-                }
-            }
-        }
+    /// 扫描 `models_dir` 下全部 `*.onnx`（只记录文件清单，不加载权重）。
+    pub fn new(models_dir: &Path, sessions: usize, device: &str) -> Self {
+        let models = Self {
+            files: Mutex::new(Vec::new()),
+            loaded: Mutex::new(HashMap::new()),
+            models_dir: models_dir.to_path_buf(),
+            sessions,
+            device: device.to_string(),
+        };
+        models.rescan();
         models
     }
 
-    /// 取变体可用的模型：优先文件名与变体 ID 相同者，否则取第一个
-    /// 输入维度匹配的模型。
-    pub fn get(&self, variant: Variant) -> Option<&Arc<OnnxModel>> {
-        self.inner
-            .iter()
-            .find(|m| m.stem == variant.as_str())
-            .or_else(|| {
-                self.inner
-                    .iter()
-                    .find(|m| m.dims.is_some_and(|d| d.matches_variant(variant)))
-            })
-            .map(|m| &m.model)
+    fn rescan(&self) {
+        let mut paths: Vec<std::path::PathBuf> = Vec::new();
+        collect_onnx_files(&self.models_dir, 0, &mut paths);
+        paths.sort();
+        let files: Vec<String> = paths
+            .into_iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect();
+        let n = files.len();
+        *self.files.lock().expect("models files 锁中毒") = files;
+        if n == 0 {
+            tracing::warn!(
+                "模型目录未找到任何 .onnx ({}，含子目录)",
+                self.models_dir.display()
+            );
+        } else {
+            tracing::info!(
+                "已扫描到 {n} 个模型文件（{}），随用随加载：对局绑定的文件首次使用时才加载权重",
+                self.models_dir.display()
+            );
+        }
     }
 
-    pub fn available(&self, variant: Variant) -> bool {
-        self.get(variant).is_some()
+    /// 模型文件清单（每次调用重扫，保证前端下拉最新；只读目录，开销可忽略）。
+    pub fn files(&self) -> Vec<String> {
+        self.rescan();
+        self.files.lock().expect("models files 锁中毒").clone()
     }
 
-    /// 变体是否有可用 AI 模型（无 onnx feature 时恒为 false）。
-    pub fn loaded_variants(&self) -> Vec<Variant> {
-        Variant::ALL
-            .iter()
-            .copied()
-            .filter(|v| self.available(*v))
-            .collect()
+    /// 随用随加载：按用户选择的文件路径取模型（缓存命中直接返回；
+    /// 未加载则构建 ort 会话并常驻缓存。加载持锁串行化，并发首用同一文件只加载一次）。
+    /// 模型与变体是否匹配不做预判——形状不匹配由推理时 ort 忠实报错。
+    pub fn acquire(&self, file: &str) -> Result<Arc<OnnxModel>, String> {
+        let mut loaded = self.loaded.lock().expect("models loaded 锁中毒");
+        if let Some(m) = loaded.get(file) {
+            return Ok(Arc::clone(m));
+        }
+        tracing::info!(
+            "首次使用，加载模型: {file}（会话池 {}，device {}）",
+            self.sessions,
+            self.device
+        );
+        let model = Arc::new(OnnxModel::with_sessions(file, &self.device, self.sessions)?);
+        loaded.insert(file.to_string(), Arc::clone(&model));
+        Ok(model)
     }
 
-    /// 已加载文件清单（健康检查用）：`(文件路径, stem, 匹配的变体 ID 列表)`。
-    pub fn loaded_files(&self) -> Vec<(String, String, Vec<String>)> {
-        self.inner
+    /// 模型文件清单与加载状态（健康检查用）：`(文件路径, 是否已加载)`。
+    pub fn loaded_files(&self) -> Vec<(String, bool)> {
+        self.files();
+        let loaded = self.loaded.lock().expect("models loaded 锁中毒");
+        self.files
+            .lock()
+            .expect("models files 锁中毒")
             .iter()
-            .map(|m| {
-                let variants = match m.dims {
-                    Some(d) => Variant::ALL
-                        .iter()
-                        .copied()
-                        .filter(|v| d.matches_variant(*v))
-                        .map(|v| v.as_str().to_string())
-                        .collect(),
-                    None => Vec::new(),
-                };
-                (m.file.clone(), m.stem.clone(), variants)
-            })
+            .map(|f| (f.clone(), loaded.contains_key(f)))
             .collect()
     }
 }
@@ -208,63 +148,20 @@ fn collect_onnx_files(dir: &Path, depth: usize, out: &mut Vec<std::path::PathBuf
     }
 }
 
-/// 读取模型输入的静态维度（board[B,C,H,W] + scalars[B,S]）。
-///
-/// OnnxModel 不暴露 Session 元数据，这里用路径开一个临时单会话读取；
-/// 结构不符（缺输入 / 秩不对 / 非张量）返回 None。
-#[cfg(feature = "onnx")]
-fn read_input_dims(path: &str) -> Option<ModelDims> {
-    let session = ort::session::Session::builder()
-        .ok()?
-        .commit_from_file(path)
-        .ok()?;
-
-    let inputs = session.inputs();
-    let tensor_dims = |name: &str| -> Option<Vec<Option<usize>>> {
-        let outlet = inputs.iter().find(|i| i.name() == name)?;
-        match outlet.dtype() {
-            ort::value::ValueType::Tensor { shape, .. } => Some(
-                shape
-                    .iter()
-                    .map(|&d| (d >= 0).then_some(d as usize))
-                    .collect(),
-            ),
-            _ => None,
-        }
-    };
-
-    let board = tensor_dims("board")?;
-    if board.len() != 4 {
-        return None;
-    }
-    let scalars = tensor_dims("scalars")?;
-    if scalars.len() != 2 {
-        return None;
-    }
-    Some(ModelDims {
-        board: [board[1], board[2], board[3]],
-        scalars: scalars[1],
-    })
-}
-
 /// 无 onnx feature 时的空模型池：AI 不可用，人人对弈仍可正常使用。
 #[cfg(not(feature = "onnx"))]
-#[derive(Default)]
 pub struct Models;
 
 #[cfg(not(feature = "onnx"))]
 impl Models {
-    pub fn load(_models_dir: &Path, _sessions: usize, _device: &str) -> Self {
+    pub fn new(_models_dir: &Path, _sessions: usize, _device: &str) -> Self {
         tracing::warn!("本次编译未启用 onnx feature，AI 对手不可用");
         Self
     }
-    pub fn available(&self, _variant: Variant) -> bool {
-        false
-    }
-    pub fn loaded_variants(&self) -> Vec<Variant> {
+    pub fn files(&self) -> Vec<String> {
         Vec::new()
     }
-    pub fn loaded_files(&self) -> Vec<(String, String, Vec<String>)> {
+    pub fn loaded_files(&self) -> Vec<(String, bool)> {
         Vec::new()
     }
 }
@@ -278,12 +175,9 @@ impl Models {
 pub struct AiConfig {
     /// AI 执子方
     pub player: Player,
-    /// 每次决策的 MCTS 模拟次数。
-    /// `follows_default = true` 时跟随服务器默认（`PUT /api/settings` 实时
-    /// 同步到进行中的对局）；创建请求显式指定 `mctsSims` 后固定不变。
+    /// 每次决策的 MCTS 模拟次数（创建对局时快照固定；
+    /// 未显式指定时取服务器当前默认值）
     pub mcts_sims: usize,
-    /// 是否跟随服务器默认搜索预算（创建对局未显式指定 `mctsSims` 时为 true）
-    pub follows_default: bool,
 }
 
 /// 单局状态：变体 + 当前快照 + 快照栈（悔棋）+ AI 配置 + 版本号。
@@ -297,18 +191,22 @@ pub struct GameSession {
     /// AI 异步决策完成后校验版本号，不一致即丢弃结果。
     pub version: u64,
     pub ai: Option<AiConfig>,
+    /// 与对局绑定的模型文件（用户显式选择，建局必需）。
+    /// AI 回合与手动搜索均使用该文件（随用随加载，常驻缓存）。
+    pub model_file: Option<String>,
     /// 最近一次 MCTS 搜索保留的树（AI 回合或手动搜索时替换；仅查询用）
     pub mcts_tree: Option<crate::mcts::MctsTreeBox>,
 }
 
 impl GameSession {
-    pub fn new(variant: Variant, ai: Option<AiConfig>) -> Self {
+    pub fn new(variant: Variant, ai: Option<AiConfig>, model_file: Option<String>) -> Self {
         Self {
             variant,
             current: variant::initial_snapshot(variant),
             history: MoveHistory::new(),
             version: 0,
             ai,
+            model_file,
             mcts_tree: None,
         }
     }
@@ -608,9 +506,8 @@ impl GameSession {
 pub struct AppState {
     pub config: ServerConfig,
     /// 运行时可调的默认 MCTS 搜索预算（模拟次数）；
-    /// 初始值取 `config.default_sims`，经 `PUT /api/settings` 在线修改：
-    /// 之后创建的对局取新值；进行中的「跟随默认」对局实时同步
-    /// （显式指定 `mctsSims` 的对局不受影响）。
+    /// 初始值取 `config.default_sims`，经 `PUT /api/settings` 在线修改。
+    /// 仅作为创建对局时未显式指定 `mctsSims` 的取值；已建对局快照固定。
     pub default_sims: std::sync::atomic::AtomicUsize,
     pub models: Models,
     /// 对局存储（std RwLock 即可：所有持锁段均为同步 CPU 操作，不跨 await）
@@ -622,7 +519,7 @@ pub type SharedState = std::sync::Arc<AppState>;
 
 impl AppState {
     pub fn new(config: ServerConfig) -> Self {
-        let models = Models::load(&config.models_dir, config.sessions, &config.device);
+        let models = Models::new(&config.models_dir, config.sessions, &config.device);
         Self {
             default_sims: std::sync::atomic::AtomicUsize::new(config.default_sims.max(1)),
             config,
@@ -639,33 +536,27 @@ impl AppState {
     }
 
     /// 运行时调整默认 MCTS 搜索预算，返回钳制后的生效值。
-    ///
-    /// 同步所有「跟随默认」的对局（创建时未显式指定 `mctsSims`），
-    /// 使运行时调整对**进行中的对局**实时生效；显式指定的对局不受影响。
+    /// 只影响之后创建的对局（已建对局的模拟次数在建局时快照固定）。
     pub fn set_default_sims(&self, sims: usize) -> usize {
         let v = sims.max(1);
         self.default_sims.store(v, std::sync::atomic::Ordering::Relaxed);
-        let mut games = self.games.write().expect("games 锁中毒");
-        for session in games.values_mut() {
-            if let Some(ai) = &mut session.ai
-                && ai.follows_default
-            {
-                ai.mcts_sims = v;
-            }
-        }
         v
     }
 
-    /// 创建对局的默认变体：--default-variant > 首个有模型者 > 首个变体。
+    /// 创建对局的默认变体：--default-variant > 首个变体。
     pub fn default_variant(&self) -> Variant {
-        if let Some(v) = self.config.default_variant {
-            return v;
-        }
-        self.models
-            .loaded_variants()
-            .first()
-            .copied()
-            .unwrap_or(Variant::ALL[0])
+        self.config.default_variant.unwrap_or(Variant::ALL[0])
+    }
+
+    /// 随用随加载：按对局绑定的模型文件取模型（缓存命中直接返回，
+    /// 首次使用时加载权重）。加载（构建 ort 会话）在 blocking 线程池执行，
+    /// 避免阻塞异步运行时；加载后常驻缓存，供所有对局复用。
+    #[cfg(feature = "onnx")]
+    pub async fn acquire_model(self: &Arc<Self>, model_file: String) -> Result<Arc<OnnxModel>, String> {
+        let app = Arc::clone(self);
+        tokio::task::spawn_blocking(move || app.models.acquire(&model_file))
+            .await
+            .map_err(|e| format!("模型加载任务失败: {e}"))?
     }
 }
 
@@ -688,53 +579,12 @@ mod tests {
         AppState::new(cfg)
     }
 
-    fn session_with_ai(mcts_sims: usize, follows_default: bool) -> GameSession {
-        GameSession::new(
-            Variant::DarkChess4x8,
-            Some(AiConfig {
-                player: Player::Black,
-                mcts_sims,
-                follows_default,
-            }),
-        )
-    }
-
-    #[test]
-    fn set_default_sims_syncs_follow_default_games_only() {
-        let app = test_app();
-        let id_follow = Uuid::new_v4();
-        let id_explicit = Uuid::new_v4();
-        {
-            let mut games = app.games.write().expect("games 锁中毒");
-            games.insert(id_follow, session_with_ai(200, true));
-            games.insert(id_explicit, session_with_ai(77, false));
-        }
-
-        let applied = app.set_default_sims(400);
-        assert_eq!(applied, 400);
-        assert_eq!(app.default_sims(), 400);
-
-        let games = app.games.read().expect("games 锁中毒");
-        assert_eq!(
-            games[&id_follow].ai.as_ref().unwrap().mcts_sims,
-            400,
-            "跟随默认的对局应实时同步新预算"
-        );
-        assert!(
-            games[&id_follow].ai.as_ref().unwrap().follows_default,
-            "跟随标记不得被同步修改"
-        );
-        assert_eq!(
-            games[&id_explicit].ai.as_ref().unwrap().mcts_sims,
-            77,
-            "显式指定的对局不受运行时调整影响"
-        );
-    }
-
     #[test]
     fn set_default_sims_clamps_to_at_least_one() {
         let app = test_app();
         assert_eq!(app.set_default_sims(0), 1);
         assert_eq!(app.default_sims(), 1);
+        // 默认变体不依赖模型扫描
+        assert_eq!(app.default_variant(), Variant::ALL[0]);
     }
 }
