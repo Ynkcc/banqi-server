@@ -211,6 +211,24 @@ impl GameSession {
         }
     }
 
+    /// 由既有快照构建会话（BFEN 粘贴重建等场景；走子历史从空开始）。
+    pub fn from_snapshot(
+        variant: Variant,
+        snapshot: PositionSnapshot,
+        ai: Option<AiConfig>,
+        model_file: Option<String>,
+    ) -> Self {
+        Self {
+            variant,
+            current: snapshot,
+            history: MoveHistory::new(),
+            version: 0,
+            ai,
+            model_file,
+            mcts_tree: None,
+        }
+    }
+
     /// 终局判定（经 with_env 重建环境检查）。
     fn is_over(&self) -> bool {
         let (terminated, truncated, _) = self.over_state();
@@ -453,6 +471,7 @@ impl GameSession {
         GameStateResp {
             game_id: game_id.to_string(),
             variant: self.variant.as_str().to_string(),
+            fen: snap.to_fen(),
             version: self.version,
             current_player: player_str(snap.current_player),
             move_count: snap.move_counter as usize,

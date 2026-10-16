@@ -6,6 +6,7 @@ use axum::Json;
 use uuid::Uuid;
 
 use banqi_core::core::env::types::Player;
+use banqi_core::core::env::PositionSnapshot;
 
 use crate::ai;
 use crate::config::parse_variant;
@@ -30,16 +31,47 @@ pub async fn create_game(
     State(app): State<SharedState>,
     Json(req): Json<CreateGameReq>,
 ) -> Result<Json<GameCreatedResp>, ApiError> {
-    // 变体：请求指定 > 服务器默认（不硬编码）
-    let variant = match req.variant.as_deref() {
-        None => app.default_variant(),
-        Some(s) => parse_variant(s).ok_or_else(|| {
-            use banqi_core::core::env::Variant;
-            ApiError::BadRequest(format!(
-                "未知变体: {s}（可用: {}）",
-                Variant::ALL.iter().map(|v| v.as_str()).collect::<Vec<_>>().join(", ")
-            ))
-        })?,
+    // 局面：BFEN 粘贴重建（变体以 BFEN 自带标识为准）> 按变体新建。
+    // 显式同时给出 variant 时校验一致性，避免静默忽略请求方意图。
+    let fen_snapshot = match req.fen.as_deref() {
+        Some(fen) if !fen.trim().is_empty() => {
+            let snap = PositionSnapshot::from_fen(fen.trim()).map_err(|e| {
+                ApiError::BadRequest(format!("BFEN 局面解析失败: {e}"))
+            })?;
+            if let Some(s) = req.variant.as_deref() {
+                let want = parse_variant(s).ok_or_else(|| {
+                    use banqi_core::core::env::Variant;
+                    ApiError::BadRequest(format!(
+                        "未知变体: {s}（可用: {}）",
+                        Variant::ALL.iter().map(|v| v.as_str()).collect::<Vec<_>>().join(", ")
+                    ))
+                })?;
+                if want != snap.variant {
+                    return Err(ApiError::BadRequest(format!(
+                        "BFEN 变体（{}）与请求变体（{}）不一致",
+                        snap.variant.as_str(),
+                        s
+                    )));
+                }
+            }
+            Some(snap)
+        }
+        _ => None,
+    };
+
+    // 变体：BFEN 自带 > 请求指定 > 服务器默认（不硬编码）
+    let variant = match fen_snapshot.as_ref() {
+        Some(s) => s.variant,
+        None => match req.variant.as_deref() {
+            None => app.default_variant(),
+            Some(s) => parse_variant(s).ok_or_else(|| {
+                use banqi_core::core::env::Variant;
+                ApiError::BadRequest(format!(
+                    "未知变体: {s}（可用: {}）",
+                    Variant::ALL.iter().map(|v| v.as_str()).collect::<Vec<_>>().join(", ")
+                ))
+            })?,
+        },
     };
 
     let ai_enabled = req.ai_enabled.unwrap_or(true);
@@ -87,7 +119,10 @@ pub async fn create_game(
     };
 
     let game_id = Uuid::new_v4();
-    let session = GameSession::new(variant, ai, model_file);
+    let session = match fen_snapshot {
+        Some(snap) => GameSession::from_snapshot(variant, snap, ai, model_file),
+        None => GameSession::new(variant, ai, model_file),
+    };
     let state = session.view(game_id);
 
     app.games

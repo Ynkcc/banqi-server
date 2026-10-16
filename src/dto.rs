@@ -26,6 +26,10 @@ pub struct CreateGameReq {
     /// 缺省自动匹配；同变体存在多个候选模型时自动匹配报歧义错误，必须显式指定。
     #[serde(default)]
     pub model_file: Option<String>,
+    /// BFEN 局面串：提供时由该局面重建对局（变体以 BFEN 自带标识为准，
+    /// 与 `variant` 同时给出时须一致；走子历史从空开始）。
+    #[serde(default)]
+    pub fen: Option<String>,
 }
 
 /// PUT /api/games/:id/model：为进行中的对局重新绑定模型文件。
@@ -119,6 +123,9 @@ pub struct AiInfoView {
 pub struct GameStateResp {
     pub game_id: String,
     pub variant: String,
+    /// 当前局面 BFEN 文本（复制 / 粘贴重建 / issue 复现用；
+    /// 不编码 last_action 与 true_board，见 banqi-core fen.rs）
+    pub fen: String,
     /// 单调递增版本号（并发/竞态防护：AI 结果与客户端操作基于版本对齐）
     pub version: u64,
     pub current_player: String,
