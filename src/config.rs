@@ -18,6 +18,9 @@ pub struct ServerConfig {
     pub default_sims: usize,
     /// 默认对局变体（创建对局未指定时使用；None = 取首个有模型者，再退回首个变体）
     pub default_variant: Option<Variant>,
+    /// NN 推理结果缓存条目上限（0 = 关闭）。条目 ≈ 1.5-2KB，
+    /// 20 万条 ≈ 300-400MB；收益来自跨局/跨树的同观测重复评估。
+    pub nn_cache_entries: usize,
 }
 
 impl Default for ServerConfig {
@@ -29,6 +32,7 @@ impl Default for ServerConfig {
             device: "cpu".to_string(),
             default_sims: 200,
             default_variant: None,
+            nn_cache_entries: 200_000,
         }
     }
 }
@@ -62,6 +66,11 @@ impl ServerConfig {
         if let Ok(v) = std::env::var("BANQI_DEFAULT_VARIANT") {
             cfg.default_variant = parse_variant(&v);
         }
+        if let Ok(v) = std::env::var("BANQI_NN_CACHE") {
+            if let Ok(n) = v.parse() {
+                cfg.nn_cache_entries = n;
+            }
+        }
         cfg
     }
 
@@ -91,6 +100,11 @@ impl ServerConfig {
                         .map_err(|_| format!("--sessions 需要正整数，得到: {value}"))?
                 }
                 "--device" => self.device = value,
+                "--nn-cache" => {
+                    self.nn_cache_entries = value
+                        .parse()
+                        .map_err(|_| format!("--nn-cache 需要非负整数（0 = 关闭），得到: {value}"))?
+                }
                 "--default-variant" => {
                     self.default_variant = Some(parse_variant(&value).ok_or_else(|| {
                         format!(
@@ -126,6 +140,8 @@ impl ServerConfig {
          \x20   --models-dir <DIR>          ONNX 模型目录（默认 models，env BANQI_MODELS_DIR）\n\
          \x20   --sessions <N>              ONNX 会话池大小（默认 1，env BANQI_SESSIONS）\n\
          \x20   --device <DEV>              cpu|cuda|auto（默认 cpu，env BANQI_DEVICE）\n\
+         \x20   --nn-cache <N>              NN 推理缓存条目上限（默认 200000，0 = 关闭，\n\
+         \x20                               env BANQI_NN_CACHE；每条 ≈ 1.5-2KB）\n\
          \x20   --default-variant <ID>      默认对局变体（env BANQI_DEFAULT_VARIANT；\n\
          \x20                               缺省时取首个有模型者，再退回首个变体）"
             .to_string()

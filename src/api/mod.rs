@@ -1,5 +1,6 @@
 //! Router 组装与基础端点（health / variants）。
 
+pub mod engine;
 pub mod games;
 pub mod mcts;
 
@@ -29,6 +30,8 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/health", get(health))
         .route("/api/variants", get(variants))
         .route("/api/settings", get(get_settings).put(put_settings))
+        // 无状态引擎端点（供连线程序调用）：BFEN 局面 → MCTS+ONNX 最优动作
+        .route("/api/engine/move", post(engine::engine_move))
         .with_state(state)
         // 内嵌前端：/api 之外的所有路径走静态资源 + SPA fallback
         .fallback(web::handler)
@@ -47,6 +50,7 @@ async fn health(State(app): State<SharedState>) -> Json<HealthResp> {
         models,
         sessions: app.config.sessions,
         device: app.config.device.clone(),
+        nn_cache_entries: app.config.nn_cache_entries,
     })
 }
 

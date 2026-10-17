@@ -47,18 +47,21 @@ pub struct Models {
     models_dir: PathBuf,
     sessions: usize,
     device: String,
+    /// NN 推理缓存条目上限（0 = 关闭；透传给 `OnnxModel::with_sessions_cached`）
+    nn_cache_entries: usize,
 }
 
 #[cfg(feature = "onnx")]
 impl Models {
     /// 扫描 `models_dir` 下全部 `*.onnx`（只记录文件清单，不加载权重）。
-    pub fn new(models_dir: &Path, sessions: usize, device: &str) -> Self {
+    pub fn new(models_dir: &Path, sessions: usize, device: &str, nn_cache_entries: usize) -> Self {
         let models = Self {
             files: Mutex::new(Vec::new()),
             loaded: Mutex::new(HashMap::new()),
             models_dir: models_dir.to_path_buf(),
             sessions,
             device: device.to_string(),
+            nn_cache_entries,
         };
         models.rescan();
         models
@@ -102,11 +105,21 @@ impl Models {
             return Ok(Arc::clone(m));
         }
         tracing::info!(
-            "首次使用，加载模型: {file}（会话池 {}，device {}）",
+            "首次使用，加载模型: {file}（会话池 {}，device {}，nncache {}）",
             self.sessions,
-            self.device
+            self.device,
+            if self.nn_cache_entries > 0 {
+                format!("开启（≤{} 条）", self.nn_cache_entries)
+            } else {
+                "关闭".to_string()
+            }
         );
-        let model = Arc::new(OnnxModel::with_sessions(file, &self.device, self.sessions)?);
+        let model = Arc::new(OnnxModel::with_sessions_cached(
+            file,
+            &self.device,
+            self.sessions,
+            self.nn_cache_entries,
+        )?);
         loaded.insert(file.to_string(), Arc::clone(&model));
         Ok(model)
     }
@@ -154,7 +167,7 @@ pub struct Models;
 
 #[cfg(not(feature = "onnx"))]
 impl Models {
-    pub fn new(_models_dir: &Path, _sessions: usize, _device: &str) -> Self {
+    pub fn new(_models_dir: &Path, _sessions: usize, _device: &str, _nn_cache_entries: usize) -> Self {
         tracing::warn!("本次编译未启用 onnx feature，AI 对手不可用");
         Self
     }
@@ -538,7 +551,12 @@ pub type SharedState = std::sync::Arc<AppState>;
 
 impl AppState {
     pub fn new(config: ServerConfig) -> Self {
-        let models = Models::new(&config.models_dir, config.sessions, &config.device);
+        let models = Models::new(
+            &config.models_dir,
+            config.sessions,
+            &config.device,
+            config.nn_cache_entries,
+        );
         Self {
             default_sims: std::sync::atomic::AtomicUsize::new(config.default_sims.max(1)),
             config,

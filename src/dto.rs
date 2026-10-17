@@ -64,6 +64,21 @@ pub struct UndoReq {
     pub steps: Option<usize>,
 }
 
+/// POST /api/engine/move：无状态引擎查询（供连线程序调用）。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EngineMoveReq {
+    /// 局面 BFEN 串（变体以 BFEN 自带标识为准；不编码 last_action 与 true_board）
+    pub fen: String,
+    /// MCTS 模拟次数；缺省时取服务器当前默认值
+    #[serde(default)]
+    pub mcts_sims: Option<usize>,
+    /// ONNX 模型文件（须在模型目录内）。缺省时按变体 ID 自动匹配
+    /// 唯一文件名候选（如 `dark_chess_4x8.onnx`）；无法唯一确定时报错。
+    #[serde(default)]
+    pub model_file: Option<String>,
+}
+
 // ============================================================================
 // 响应
 // ============================================================================
@@ -318,6 +333,30 @@ pub struct HealthResp {
     pub models: Vec<ModelInfo>,
     pub sessions: usize,
     pub device: String,
+    /// NN 推理缓存条目上限（0 = 关闭）
+    pub nn_cache_entries: usize,
+}
+
+/// POST /api/engine/move 响应：给定局面的 MCTS+ONNX 决策（不落子、无会话状态）。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EngineMoveResp {
+    /// 变体 ID（由 BFEN 解出）
+    pub variant: String,
+    /// 该局面的行棋方："red" / "black"
+    pub current_player: String,
+    /// 动作空间索引
+    pub action: usize,
+    /// 源格索引（翻棋时 == to）
+    pub from: usize,
+    /// 目标格索引
+    pub to: usize,
+    /// 是否机会动作（翻棋 / 吃暗子，结果有随机性）
+    pub is_chance: bool,
+    /// 是否纯翻棋（action < reveal_actions_count；翻棋必为机会动作）
+    pub is_flip: bool,
+    /// 本次搜索统计
+    pub mcts_stats: MctsStatsDto,
 }
 
 // ============================================================================
