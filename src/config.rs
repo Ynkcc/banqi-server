@@ -21,6 +21,10 @@ pub struct ServerConfig {
     /// NN 推理结果缓存条目上限（0 = 关闭）。条目 ≈ 1.5-2KB，
     /// 20 万条 ≈ 300-400MB；收益来自跨局/跨树的同观测重复评估。
     pub nn_cache_entries: usize,
+    /// NNUE 对手默认搜索深度（迭代加深上限；创建对局未指定时使用）
+    pub default_nnue_depth: i32,
+    /// NNUE 对手默认节点预算（创建对局未指定时使用）
+    pub default_nnue_budget: u64,
 }
 
 impl Default for ServerConfig {
@@ -33,6 +37,8 @@ impl Default for ServerConfig {
             default_sims: 200,
             default_variant: None,
             nn_cache_entries: 200_000,
+            default_nnue_depth: 8,
+            default_nnue_budget: 200_000,
         }
     }
 }
@@ -71,6 +77,16 @@ impl ServerConfig {
                 cfg.nn_cache_entries = n;
             }
         }
+        if let Ok(v) = std::env::var("BANQI_NNUE_DEPTH") {
+            if let Ok(n) = v.parse() {
+                cfg.default_nnue_depth = n;
+            }
+        }
+        if let Ok(v) = std::env::var("BANQI_NNUE_BUDGET") {
+            if let Ok(n) = v.parse() {
+                cfg.default_nnue_budget = n;
+            }
+        }
         cfg
     }
 
@@ -105,6 +121,16 @@ impl ServerConfig {
                         .parse()
                         .map_err(|_| format!("--nn-cache 需要非负整数（0 = 关闭），得到: {value}"))?
                 }
+                "--nnue-depth" => {
+                    self.default_nnue_depth = value
+                        .parse()
+                        .map_err(|_| format!("--nnue-depth 需要正整数，得到: {value}"))?
+                }
+                "--nnue-budget" => {
+                    self.default_nnue_budget = value
+                        .parse()
+                        .map_err(|_| format!("--nnue-budget 需要非负整数，得到: {value}"))?
+                }
                 "--default-variant" => {
                     self.default_variant = Some(parse_variant(&value).ok_or_else(|| {
                         format!(
@@ -130,6 +156,12 @@ impl ServerConfig {
         if self.default_sims == 0 {
             return Err("default_sims 必须至少为 1".to_string());
         }
+        if self.default_nnue_depth <= 0 {
+            return Err("default_nnue_depth 必须至少为 1".to_string());
+        }
+        if self.default_nnue_budget == 0 {
+            return Err("default_nnue_budget 必须至少为 1".to_string());
+        }
         Ok(())
     }
 
@@ -142,6 +174,8 @@ impl ServerConfig {
          \x20   --device <DEV>              cpu|cuda|auto（默认 cpu，env BANQI_DEVICE）\n\
          \x20   --nn-cache <N>              NN 推理缓存条目上限（默认 200000，0 = 关闭，\n\
          \x20                               env BANQI_NN_CACHE；每条 ≈ 1.5-2KB）\n\
+         \x20   --nnue-depth <N>            NNUE 对手默认搜索深度（默认 8，env BANQI_NNUE_DEPTH）\n\
+         \x20   --nnue-budget <N>           NNUE 对手默认节点预算（默认 200000，env BANQI_NNUE_BUDGET）\n\
          \x20   --default-variant <ID>      默认对局变体（env BANQI_DEFAULT_VARIANT；\n\
          \x20                               缺省时取首个有模型者，再退回首个变体）"
             .to_string()

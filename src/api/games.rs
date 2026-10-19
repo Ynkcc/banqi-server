@@ -15,7 +15,7 @@ use crate::dto::{
     ModelBindReq, MoveReq, MoveResp, UndoReq, player_str,
 };
 use crate::error::ApiError;
-use crate::state::{AiConfig, GameSession, SharedState};
+use crate::state::{AiConfig, EngineKind, GameSession, SharedState};
 
 /// 解析路径中的对局 ID。
 fn parse_game_id(raw: &str) -> Result<Uuid, ApiError> {
@@ -75,30 +75,42 @@ pub async fn create_game(
     };
 
     let ai_enabled = req.ai_enabled.unwrap_or(true);
-    // 模型加载与对局绑定：AI 对局必须显式指定模型文件（用户从
-    // GET /api/health 的模型清单中选择）；不做变体预判，形状不匹配
-    // 由推理时 ort 忠实报错。建局即加载（随用随加载），坏文件在此报错。
-    #[cfg(not(feature = "onnx"))]
-    if ai_enabled {
-        return Err(ApiError::ModelUnavailable(
-            "服务编译未启用 onnx 推理，AI 对手不可用".into(),
-        ));
-    }
+    // 模型加载与对局绑定：AI 对局须绑定模型文件（用户显式指定；缺省按变体 ID
+    // 自动匹配唯一候选）。推理后端由扩展名决定：`.nnue` → Expectimax+NNUE，
+    // 其余 → MCTS+ONNX。建局即加载（随用随加载），坏文件在此报错。
     let model_file = if ai_enabled {
-        Some(req.model_file.clone().filter(|s| !s.is_empty()).ok_or_else(|| {
-            ApiError::BadRequest(
-                "启用 AI 需显式指定 modelFile（从 GET /api/health 的模型清单中选择）".into(),
-            )
-        })?)
+        match req.model_file.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            Some(f) => Some(f.to_string()),
+            None => Some(app.auto_match_model(variant)?),
+        }
     } else {
         None
     };
+    let engine = EngineKind::from_model_file(model_file.as_deref().expect("AI 对局必有模型文件"));
     let ai = if ai_enabled {
-        // 建局即加载：坏模型在建局时报错而非对局中途；加载后常驻缓存供 AI 回合复用
-        #[cfg(feature = "onnx")]
-        app.acquire_model(model_file.clone().expect("AI 对局必有模型文件"))
-            .await
-            .map_err(|e| ApiError::ModelUnavailable(format!("模型加载失败: {e}")))?;
+        let model_file_owned = model_file.clone().expect("AI 对局必有模型文件");
+        match engine {
+            EngineKind::Nnue => {
+                // 建局即加载 + 布局校验：坏模型 / 跨变体权重在建局时报错而非对局中途
+                let evaluator = app
+                    .acquire_nnue_model(model_file_owned)
+                    .await
+                    .map_err(|e| ApiError::ModelUnavailable(format!("模型加载失败: {e}")))?;
+                evaluator
+                    .validate_layout(&variant.config())
+                    .map_err(|e| ApiError::ModelUnavailable(format!(".nnue 权重与变体 {} 不匹配: {e}", variant.as_str())))?;
+            }
+            EngineKind::MctsOnnx => {
+                #[cfg(feature = "onnx")]
+                app.acquire_model(model_file_owned)
+                    .await
+                    .map_err(|e| ApiError::ModelUnavailable(format!("模型加载失败: {e}")))?;
+                #[cfg(not(feature = "onnx"))]
+                return Err(ApiError::ModelUnavailable(
+                    "服务编译未启用 onnx 推理，MCTS+ONNX 对手不可用（请选择 .nnue 模型）".into(),
+                ));
+            }
+        }
         let player = match req.ai_player.as_deref() {
             None | Some("auto") => Player::Black, // 默认 AI 执黑，人类执红先行
             Some("red") => Player::Red,
@@ -111,8 +123,11 @@ pub async fn create_game(
         };
         Some(AiConfig {
             player,
+            engine,
             // 建局时快照固定；未显式指定取服务器当前默认值
             mcts_sims: req.mcts_sims.unwrap_or_else(|| app.default_sims()).max(1),
+            nnue_depth: req.nnue_depth.unwrap_or_else(|| app.default_nnue_depth()).max(1),
+            nnue_budget: req.nnue_budget.unwrap_or_else(|| app.default_nnue_budget()).max(1),
         })
     } else {
         None
@@ -228,11 +243,13 @@ pub async fn move_piece(
         action: human_view,
     }];
     let mut mcts_stats = None;
+    let mut nnue_stats = None;
     if let Some(version) = ai_version {
         match ai::run_ai_turn(&app, game_id, version).await? {
-            Some((new_state, ai_action, stats)) => {
+            Some((new_state, ai_action, m, n)) => {
                 actions.push(ai_action);
-                mcts_stats = stats;
+                mcts_stats = m;
+                nnue_stats = n;
                 state = new_state;
             }
             None => {
@@ -245,7 +262,7 @@ pub async fn move_piece(
         }
     }
 
-    Ok(Json(MoveResp { state, actions, mcts_stats }))
+    Ok(Json(MoveResp { state, actions, mcts_stats, nnue_stats }))
 }
 
 /// POST /api/games/:id/ai-move
@@ -267,10 +284,11 @@ pub async fn ai_move(
     };
 
     match ai::run_ai_turn(&app, game_id, version).await? {
-        Some((state, ai_action, mcts_stats)) => Ok(Json(MoveResp {
+        Some((state, ai_action, mcts_stats, nnue_stats)) => Ok(Json(MoveResp {
             state,
             actions: vec![ai_action],
             mcts_stats,
+            nnue_stats,
         })),
         None => Err(ApiError::BadRequest(
             "AI 结果作废（期间对局被并发修改），请重试".to_string(),
@@ -281,27 +299,52 @@ pub async fn ai_move(
 /// PUT /api/games/:id/model
 ///
 /// 为进行中的对局重新绑定（并预加载）用户选择的模型文件。
-/// 此后该对局的 AI 回合与手动搜索均使用该模型。
+/// 推理后端由扩展名决定（`.nnue` → Expectimax+NNUE，其余 → MCTS+ONNX），
+/// 换绑时同步切换；此后该对局的 AI 回合均使用该模型。
 pub async fn bind_model(
     State(app): State<SharedState>,
     Path(id): Path<String>,
     Json(req): Json<ModelBindReq>,
 ) -> Result<Json<GameStateResp>, ApiError> {
     let game_id = parse_game_id(&id)?;
+    let engine = EngineKind::from_model_file(&req.model_file);
 
-    // 锁 1：校验 AI 已启用（立即释放）
-    {
+    // 锁 1：校验 AI 已启用并取出变体（NNUE 布局校验用，立即释放）
+    let variant = {
         let games = app.games.read().expect("games 锁中毒");
         let s = games
             .get(&game_id)
             .ok_or_else(|| ApiError::GameNotFound(id.clone()))?;
         s.ai.as_ref().ok_or(ApiError::AiDisabled)?;
-    }
+        s.variant
+    };
 
     // 锁外预加载（blocking 线程池，可能耗时；坏文件在此报错）
-    app.acquire_model(req.model_file.clone())
-        .await
-        .map_err(|e| ApiError::ModelUnavailable(format!("模型 {} 绑定失败: {e}", req.model_file)))?;
+    match engine {
+        EngineKind::Nnue => {
+            let evaluator = app
+                .acquire_nnue_model(req.model_file.clone())
+                .await
+                .map_err(|e| {
+                    ApiError::ModelUnavailable(format!("模型 {} 绑定失败: {e}", req.model_file))
+                })?;
+            evaluator.validate_layout(&variant.config()).map_err(|e| {
+                ApiError::ModelUnavailable(format!(".nnue 权重与变体 {} 不匹配: {e}", variant.as_str()))
+            })?;
+        }
+        EngineKind::MctsOnnx => {
+            #[cfg(feature = "onnx")]
+            app.acquire_model(req.model_file.clone())
+                .await
+                .map_err(|e| {
+                    ApiError::ModelUnavailable(format!("模型 {} 绑定失败: {e}", req.model_file))
+                })?;
+            #[cfg(not(feature = "onnx"))]
+            return Err(ApiError::ModelUnavailable(
+                "服务编译未启用 onnx 推理，MCTS+ONNX 模型不可用（请绑定 .nnue 模型）".into(),
+            ));
+        }
+    }
 
     // 锁 2：写入绑定
     let mut games = app.games.write().expect("games 锁中毒");
@@ -309,7 +352,10 @@ pub async fn bind_model(
         .get_mut(&game_id)
         .ok_or_else(|| ApiError::GameNotFound(id.clone()))?;
     s.model_file = Some(req.model_file.clone());
-    tracing::info!(game = %game_id, "对局重绑模型: {}", req.model_file);
+    if let Some(ai) = s.ai.as_mut() {
+        ai.engine = engine;
+    }
+    tracing::info!(game = %game_id, engine = ?engine, "对局重绑模型: {}", req.model_file);
     Ok(Json(s.view(game_id)))
 }
 

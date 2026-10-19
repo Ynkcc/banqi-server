@@ -75,6 +75,7 @@ pub async fn board(
 /// POST /api/games/:id/mcts/search
 ///
 /// 在当前局面上手动触发一次 MCTS 搜索（不走子），替换会话中的浏览树。
+#[cfg(feature = "onnx")]
 pub async fn search(
     State(app): State<SharedState>,
     Path(id): Path<String>,
@@ -115,4 +116,16 @@ pub async fn search(
     }
     tracing::info!(game = %game_id, "手动 MCTS 搜索完成");
     Ok(Json(info))
+}
+
+/// 无 onnx feature 时的回退：MCTS 手动搜索不可用。
+#[cfg(not(feature = "onnx"))]
+pub async fn search(
+    State(_app): State<SharedState>,
+    Path(id): Path<String>,
+) -> Result<Json<MctsRootInfo>, ApiError> {
+    let _ = id;
+    Err(ApiError::ModelUnavailable(
+        "服务编译未启用 onnx 推理，MCTS 手动搜索不可用".into(),
+    ))
 }

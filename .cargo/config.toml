@@ -1,0 +1,6 @@
+# 性能基线：x86-64-v3（AVX2 + FMA，Haswell 2013+ 普遍支持）。
+# NNUE 前向传播的 FC1 矩阵乘依赖 SIMD；默认 target（SSE2 基线）实测使
+# NNUE 搜索仅 160k NPS（forward_accumulator 占 96% CPU）。
+# 注意：产物不兼容 v3 之前的旧 CPU（<2013）。
+[build]
+rustflags = ["-C", "target-cpu=x86-64-v3"]

@@ -75,20 +75,39 @@ async fn variants() -> Json<VariantsResp> {
     })
 }
 
-/// GET /api/settings：读取运行时可调的服务端设置（当前仅默认 MCTS 搜索预算）。
+/// GET /api/settings：读取运行时可调的服务端设置（默认 MCTS 搜索预算 / NNUE 深度与预算）。
 async fn get_settings(State(app): State<SharedState>) -> Json<SettingsResp> {
     Json(SettingsResp {
         mcts_sims: app.default_sims(),
+        nnue_depth: app.default_nnue_depth(),
+        nnue_budget: app.default_nnue_budget(),
     })
 }
 
-/// PUT /api/settings：运行时调整默认 MCTS 搜索预算（进行中的「跟随默认」
-/// 对局实时同步；显式指定 `mctsSims` 的对局不受影响）。
+/// PUT /api/settings：运行时调整默认引擎参数（进行中的「跟随默认」对局实时同步；
+/// 显式指定参数的对局不受影响）。缺省字段不修改。
 async fn put_settings(
     State(app): State<SharedState>,
     Json(req): Json<SettingsReq>,
 ) -> Json<SettingsResp> {
-    let applied = app.set_default_sims(req.mcts_sims);
-    tracing::info!("运行时调整默认 MCTS 搜索预算: {applied}");
-    Json(SettingsResp { mcts_sims: applied })
+    let mcts_sims = match req.mcts_sims {
+        Some(v) => app.set_default_sims(v),
+        None => app.default_sims(),
+    };
+    let nnue_depth = match req.nnue_depth {
+        Some(v) => app.set_default_nnue_depth(v),
+        None => app.default_nnue_depth(),
+    };
+    let nnue_budget = match req.nnue_budget {
+        Some(v) => app.set_default_nnue_budget(v),
+        None => app.default_nnue_budget(),
+    };
+    tracing::info!(
+        "运行时调整默认引擎参数: mcts_sims={mcts_sims}, nnue_depth={nnue_depth}, nnue_budget={nnue_budget}"
+    );
+    Json(SettingsResp {
+        mcts_sims,
+        nnue_depth,
+        nnue_budget,
+    })
 }

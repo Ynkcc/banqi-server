@@ -5,10 +5,7 @@
 //! `with_env!` 宏重建泛型环境执行 —— server 侧不假设变体种类。
 
 use std::collections::HashMap;
-use std::path::Path;
-#[cfg(feature = "onnx")]
-use std::path::PathBuf;
-#[cfg(feature = "onnx")]
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::{Mutex, RwLock};
 
@@ -17,6 +14,7 @@ use uuid::Uuid;
 use banqi_core::core::env::error::EnvError;
 use banqi_core::core::env::types::Player;
 use banqi_core::core::env::{GameEnv, MoveHistory, MoveRecord, PositionSnapshot, SnapshotEnv, Variant};
+use banqi_engine::nnue::NnueEvaluator;
 #[cfg(feature = "onnx")]
 use banqi_engine::inference::onnx::OnnxModel;
 
@@ -29,38 +27,81 @@ use crate::error::ApiError;
 use crate::variant;
 
 // ============================================================================
-// ONNX 模型池：只提供「文件清单 + 按路径加载缓存」。
+// 模型池：只提供「文件清单 + 按路径加载缓存」。
+//
+// 同时支持两类模型文件，按扩展名分派推理后端：
+// - `.onnx` → MCTS + ONNX（需 onnx feature）；
+// - `.nnue` → Expectimax + NNUE（无外部依赖，始终可用）。
 //
 // 不做任何变体关联：不要求文件命名、不预判模型所属变体、无默认兜底。
 // 用户在前端自行选择模型文件并与对局绑定（`GameSession.model_file`）；
-// 输入维度不匹配不做预校验，推理时由 ort 忠实返回形状错误。
+// 输入维度不匹配不做预校验（NNUE 建局/绑定时校验布局，ONNX 由推理时 ort 报错）。
 // ============================================================================
+
+/// AI 推理后端类型（由对局绑定模型文件的扩展名决定）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EngineKind {
+    /// MCTS + ONNX（.onnx）
+    MctsOnnx,
+    /// Expectimax + NNUE（.nnue）
+    Nnue,
+}
+
+impl EngineKind {
+    /// 由模型文件扩展名推断推理后端（`.nnue` → NNUE，其余按 ONNX 处理）。
+    pub fn from_model_file(file: &str) -> Self {
+        if file.to_ascii_lowercase().ends_with(".nnue") {
+            Self::Nnue
+        } else {
+            Self::MctsOnnx
+        }
+    }
+
+    /// 机器可读标识（DTO 下发用）。
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::MctsOnnx => "mcts-onnx",
+            Self::Nnue => "nnue",
+        }
+    }
+}
 
 /// 模型池：启动只**扫描**模型目录得到文件清单（不加载权重）；
 /// 按文件路径随用随加载并**常驻缓存**，供所有对局复用。
-#[cfg(feature = "onnx")]
 pub struct Models {
-    /// 扫描到的模型文件清单（`rescan` 刷新）
+    /// 扫描到的模型文件清单（`rescan` 刷新；含 .onnx 与 .nnue）
     files: Mutex<Vec<String>>,
-    /// 已加载模型缓存（key = 文件路径）。加载持锁串行化：并发首用同一文件只加载一次。
-    loaded: Mutex<HashMap<String, Arc<OnnxModel>>>,
+    /// 已加载 ONNX 模型缓存（key = 文件路径）。加载持锁串行化：并发首用同一文件只加载一次。
+    #[cfg(feature = "onnx")]
+    loaded_onnx: Mutex<HashMap<String, Arc<OnnxModel>>>,
+    /// 已加载 NNUE 评估器缓存（key = 文件路径；无 feature 依赖，始终可用）。
+    loaded_nnue: Mutex<HashMap<String, Arc<NnueEvaluator>>>,
     models_dir: PathBuf,
+    #[cfg(feature = "onnx")]
     sessions: usize,
+    #[cfg(feature = "onnx")]
     device: String,
     /// NN 推理缓存条目上限（0 = 关闭；透传给 `OnnxModel::with_sessions_cached`）
+    #[cfg(feature = "onnx")]
     nn_cache_entries: usize,
 }
 
-#[cfg(feature = "onnx")]
 impl Models {
-    /// 扫描 `models_dir` 下全部 `*.onnx`（只记录文件清单，不加载权重）。
+    /// 扫描 `models_dir` 下全部 `*.onnx` / `*.nnue`（只记录文件清单，不加载权重）。
     pub fn new(models_dir: &Path, sessions: usize, device: &str, nn_cache_entries: usize) -> Self {
+        #[cfg(not(feature = "onnx"))]
+        let _ = (sessions, device, nn_cache_entries);
         let models = Self {
             files: Mutex::new(Vec::new()),
-            loaded: Mutex::new(HashMap::new()),
+            #[cfg(feature = "onnx")]
+            loaded_onnx: Mutex::new(HashMap::new()),
+            loaded_nnue: Mutex::new(HashMap::new()),
             models_dir: models_dir.to_path_buf(),
+            #[cfg(feature = "onnx")]
             sessions,
+            #[cfg(feature = "onnx")]
             device: device.to_string(),
+            #[cfg(feature = "onnx")]
             nn_cache_entries,
         };
         models.rescan();
@@ -69,7 +110,7 @@ impl Models {
 
     fn rescan(&self) {
         let mut paths: Vec<std::path::PathBuf> = Vec::new();
-        collect_onnx_files(&self.models_dir, 0, &mut paths);
+        collect_model_files(&self.models_dir, 0, &mut paths);
         paths.sort();
         let files: Vec<String> = paths
             .into_iter()
@@ -79,7 +120,7 @@ impl Models {
         *self.files.lock().expect("models files 锁中毒") = files;
         if n == 0 {
             tracing::warn!(
-                "模型目录未找到任何 .onnx ({}，含子目录)",
+                "模型目录未找到任何 .onnx / .nnue ({}，含子目录)",
                 self.models_dir.display()
             );
         } else {
@@ -96,16 +137,17 @@ impl Models {
         self.files.lock().expect("models files 锁中毒").clone()
     }
 
-    /// 随用随加载：按用户选择的文件路径取模型（缓存命中直接返回；
-    /// 未加载则构建 ort 会话并常驻缓存。加载持锁串行化，并发首用同一文件只加载一次）。
+    /// 随用随加载 ONNX 模型（缓存命中直接返回；未加载则构建 ort 会话并常驻缓存。
+    /// 加载持锁串行化，并发首用同一文件只加载一次）。
     /// 模型与变体是否匹配不做预判——形状不匹配由推理时 ort 忠实报错。
-    pub fn acquire(&self, file: &str) -> Result<Arc<OnnxModel>, String> {
-        let mut loaded = self.loaded.lock().expect("models loaded 锁中毒");
+    #[cfg(feature = "onnx")]
+    pub fn acquire_onnx(&self, file: &str) -> Result<Arc<OnnxModel>, String> {
+        let mut loaded = self.loaded_onnx.lock().expect("models loaded 锁中毒");
         if let Some(m) = loaded.get(file) {
             return Ok(Arc::clone(m));
         }
         tracing::info!(
-            "首次使用，加载模型: {file}（会话池 {}，device {}，nncache {}）",
+            "首次使用，加载 ONNX 模型: {file}（会话池 {}，device {}，nncache {}）",
             self.sessions,
             self.device,
             if self.nn_cache_entries > 0 {
@@ -124,22 +166,59 @@ impl Models {
         Ok(model)
     }
 
+    /// 无 onnx feature 时的 ONNX 加载回退：明确报错（NNUE 对手仍可用）。
+    #[cfg(not(feature = "onnx"))]
+    #[allow(dead_code)]
+    pub fn acquire_onnx(&self, _file: &str) -> Result<std::convert::Infallible, String> {
+        Err("服务编译未启用 onnx 推理，ONNX 模型不可用（.nnue 对手仍可用）".to_string())
+    }
+
+    /// 随用随加载 NNUE 评估器（量化前向权重，纯 CPU 计算，无 feature 依赖）。
+    /// 加载即解析自解释头部并校验网络维度常量；与变体的布局匹配在
+    /// 建局/绑定时以 `validate_layout` 显式校验。
+    pub fn acquire_nnue(&self, file: &str) -> Result<Arc<NnueEvaluator>, String> {
+        let mut loaded = self.loaded_nnue.lock().expect("models nnue 锁中毒");
+        if let Some(e) = loaded.get(file) {
+            return Ok(Arc::clone(e));
+        }
+        tracing::info!("首次使用，加载 NNUE 模型: {file}");
+        let evaluator = Arc::new(NnueEvaluator::load_from_file(file)?);
+        loaded.insert(file.to_string(), Arc::clone(&evaluator));
+        Ok(evaluator)
+    }
+
     /// 模型文件清单与加载状态（健康检查用）：`(文件路径, 是否已加载)`。
     pub fn loaded_files(&self) -> Vec<(String, bool)> {
         self.files();
-        let loaded = self.loaded.lock().expect("models loaded 锁中毒");
+        let loaded_keys: std::collections::HashSet<String> = {
+            let mut set: std::collections::HashSet<String> = self
+                .loaded_nnue
+                .lock()
+                .expect("models nnue 锁中毒")
+                .keys()
+                .cloned()
+                .collect();
+            #[cfg(feature = "onnx")]
+            set.extend(
+                self.loaded_onnx
+                    .lock()
+                    .expect("models loaded 锁中毒")
+                    .keys()
+                    .cloned(),
+            );
+            set
+        };
         self.files
             .lock()
             .expect("models files 锁中毒")
             .iter()
-            .map(|f| (f.clone(), loaded.contains_key(f)))
+            .map(|f| (f.clone(), loaded_keys.contains(f)))
             .collect()
     }
 }
 
-/// 递归收集目录下的 `*.onnx`（深度限制 4 层，与 banqi-gui 的模型扫描口径一致）。
-#[cfg(feature = "onnx")]
-fn collect_onnx_files(dir: &Path, depth: usize, out: &mut Vec<std::path::PathBuf>) {
+/// 递归收集目录下的 `*.onnx` / `*.nnue`（深度限制 4 层，与 banqi-gui 的模型扫描口径一致）。
+fn collect_model_files(dir: &Path, depth: usize, out: &mut Vec<std::path::PathBuf>) {
     if depth > 4 {
         return;
     }
@@ -152,30 +231,18 @@ fn collect_onnx_files(dir: &Path, depth: usize, out: &mut Vec<std::path::PathBuf
     for e in entries.flatten() {
         let path = e.path();
         match e.file_type() {
-            Ok(ft) if ft.is_dir() => collect_onnx_files(&path, depth + 1, out),
-            Ok(ft) if ft.is_file() && path.extension().and_then(|x| x.to_str()) == Some("onnx") => {
+            Ok(ft) if ft.is_dir() => collect_model_files(&path, depth + 1, out),
+            Ok(ft)
+                if ft.is_file()
+                    && matches!(
+                        path.extension().and_then(|x| x.to_str()),
+                        Some("onnx") | Some("nnue")
+                    ) =>
+            {
                 out.push(path);
             }
             _ => {}
         }
-    }
-}
-
-/// 无 onnx feature 时的空模型池：AI 不可用，人人对弈仍可正常使用。
-#[cfg(not(feature = "onnx"))]
-pub struct Models;
-
-#[cfg(not(feature = "onnx"))]
-impl Models {
-    pub fn new(_models_dir: &Path, _sessions: usize, _device: &str, _nn_cache_entries: usize) -> Self {
-        tracing::warn!("本次编译未启用 onnx feature，AI 对手不可用");
-        Self
-    }
-    pub fn files(&self) -> Vec<String> {
-        Vec::new()
-    }
-    pub fn loaded_files(&self) -> Vec<(String, bool)> {
-        Vec::new()
     }
 }
 
@@ -188,9 +255,17 @@ impl Models {
 pub struct AiConfig {
     /// AI 执子方
     pub player: Player,
-    /// 每次决策的 MCTS 模拟次数（创建对局时快照固定；
+    /// 推理后端（由绑定模型文件扩展名决定；换绑模型时同步更新）
+    pub engine: EngineKind,
+    /// MCTS 模拟次数（MctsOnnx 后端；创建对局时快照固定，
     /// 未显式指定时取服务器当前默认值）
     pub mcts_sims: usize,
+    /// NNUE 搜索深度（Nnue 后端；创建对局时快照固定，
+    /// 未显式指定时取服务器当前默认值）
+    pub nnue_depth: i32,
+    /// NNUE 节点预算（Nnue 后端；创建对局时快照固定，
+    /// 未显式指定时取服务器当前默认值）
+    pub nnue_budget: u64,
 }
 
 /// 单局状态：变体 + 当前快照 + 快照栈（悔棋）+ AI 配置 + 版本号。
@@ -442,12 +517,18 @@ impl GameSession {
             Some(ai) => AiInfoView {
                 enabled: true,
                 player: Some(player_str(ai.player)),
+                engine: Some(ai.engine.as_str().to_string()),
                 mcts_sims: ai.mcts_sims,
+                nnue_depth: (ai.engine == EngineKind::Nnue).then_some(ai.nnue_depth),
+                nnue_budget: (ai.engine == EngineKind::Nnue).then_some(ai.nnue_budget),
             },
             None => AiInfoView {
                 enabled: false,
                 player: None,
+                engine: None,
                 mcts_sims: 0,
+                nnue_depth: None,
+                nnue_budget: None,
             },
         };
 
@@ -541,6 +622,10 @@ pub struct AppState {
     /// 初始值取 `config.default_sims`，经 `PUT /api/settings` 在线修改。
     /// 仅作为创建对局时未显式指定 `mctsSims` 的取值；已建对局快照固定。
     pub default_sims: std::sync::atomic::AtomicUsize,
+    /// 运行时可调的 NNUE 对手默认搜索深度（同上：仅建局取值用）
+    pub default_nnue_depth: std::sync::atomic::AtomicI32,
+    /// 运行时可调的 NNUE 对手默认节点预算（同上：仅建局取值用）
+    pub default_nnue_budget: std::sync::atomic::AtomicU64,
     pub models: Models,
     /// 对局存储（std RwLock 即可：所有持锁段均为同步 CPU 操作，不跨 await）
     pub games: RwLock<HashMap<Uuid, GameSession>>,
@@ -559,6 +644,8 @@ impl AppState {
         );
         Self {
             default_sims: std::sync::atomic::AtomicUsize::new(config.default_sims.max(1)),
+            default_nnue_depth: std::sync::atomic::AtomicI32::new(config.default_nnue_depth.max(1)),
+            default_nnue_budget: std::sync::atomic::AtomicU64::new(config.default_nnue_budget.max(1)),
             config,
             models,
             games: RwLock::new(HashMap::new()),
@@ -580,18 +667,86 @@ impl AppState {
         v
     }
 
+    /// 当前默认 NNUE 搜索深度（原子读取，钳制到至少 1）。
+    pub fn default_nnue_depth(&self) -> i32 {
+        self.default_nnue_depth
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .max(1)
+    }
+
+    /// 运行时调整默认 NNUE 搜索深度，返回钳制后的生效值。
+    pub fn set_default_nnue_depth(&self, depth: i32) -> i32 {
+        let v = depth.max(1);
+        self.default_nnue_depth
+            .store(v, std::sync::atomic::Ordering::Relaxed);
+        v
+    }
+
+    /// 当前默认 NNUE 节点预算（原子读取，钳制到至少 1）。
+    pub fn default_nnue_budget(&self) -> u64 {
+        self.default_nnue_budget
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .max(1)
+    }
+
+    /// 运行时调整默认 NNUE 节点预算，返回钳制后的生效值。
+    pub fn set_default_nnue_budget(&self, budget: u64) -> u64 {
+        let v = budget.max(1);
+        self.default_nnue_budget
+            .store(v, std::sync::atomic::Ordering::Relaxed);
+        v
+    }
+
     /// 创建对局的默认变体：--default-variant > 首个变体。
     pub fn default_variant(&self) -> Variant {
         self.config.default_variant.unwrap_or(Variant::ALL[0])
     }
 
-    /// 随用随加载：按对局绑定的模型文件取模型（缓存命中直接返回，
+    /// 未显式指定模型时的自动匹配：文件名主干 == 变体 ID 的唯一候选
+    /// （`.onnx` / `.nnue` 均参与；模型目录约定 `<variant_id>.onnx|.nnue`）。
+    pub fn auto_match_model(&self, variant: Variant) -> Result<String, ApiError> {
+        let id = variant.as_str();
+        let candidates: Vec<String> = self
+            .models
+            .files()
+            .into_iter()
+            .filter(|f| {
+                std::path::Path::new(f)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|s| s.eq_ignore_ascii_case(id))
+            })
+            .collect();
+        match candidates.len() {
+            1 => Ok(candidates.into_iter().next().expect("候选数已判为 1")),
+            0 => Err(ApiError::BadRequest(format!(
+                "未指定 modelFile 且未找到文件名为 {id}.onnx / {id}.nnue 的模型（可用清单见 GET /api/health）"
+            ))),
+            _ => Err(ApiError::BadRequest(format!(
+                "变体 {id} 匹配到多个候选，须显式指定 modelFile: {}",
+                candidates.join(", ")
+            ))),
+        }
+    }
+
+    /// 随用随加载：按对局绑定的模型文件取 ONNX 模型（缓存命中直接返回，
     /// 首次使用时加载权重）。加载（构建 ort 会话）在 blocking 线程池执行，
     /// 避免阻塞异步运行时；加载后常驻缓存，供所有对局复用。
     #[cfg(feature = "onnx")]
     pub async fn acquire_model(self: &Arc<Self>, model_file: String) -> Result<Arc<OnnxModel>, String> {
         let app = Arc::clone(self);
-        tokio::task::spawn_blocking(move || app.models.acquire(&model_file))
+        tokio::task::spawn_blocking(move || app.models.acquire_onnx(&model_file))
+            .await
+            .map_err(|e| format!("模型加载任务失败: {e}"))?
+    }
+
+    /// 随用随加载：按对局绑定的模型文件取 NNUE 评估器（解析自解释头部）。
+    pub async fn acquire_nnue_model(
+        self: &Arc<Self>,
+        model_file: String,
+    ) -> Result<Arc<NnueEvaluator>, String> {
+        let app = Arc::clone(self);
+        tokio::task::spawn_blocking(move || app.models.acquire_nnue(&model_file))
             .await
             .map_err(|e| format!("模型加载任务失败: {e}"))?
     }

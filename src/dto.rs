@@ -24,8 +24,15 @@ pub struct CreateGameReq {
     pub mcts_sims: Option<usize>,
     /// 显式绑定的模型文件（用户从 /api/health 模型清单中选择；须在模型目录内）。
     /// 缺省自动匹配；同变体存在多个候选模型时自动匹配报歧义错误，必须显式指定。
+    /// 推理后端由扩展名决定：`.nnue` → Expectimax+NNUE，其余 → MCTS+ONNX。
     #[serde(default)]
     pub model_file: Option<String>,
+    /// NNUE 搜索深度（仅 `.nnue` 模型生效）；缺省时取服务器当前默认值。
+    #[serde(default)]
+    pub nnue_depth: Option<i32>,
+    /// NNUE 节点预算（仅 `.nnue` 模型生效）；缺省时取服务器当前默认值。
+    #[serde(default)]
+    pub nnue_budget: Option<u64>,
     /// BFEN 局面串：提供时由该局面重建对局（变体以 BFEN 自带标识为准，
     /// 与 `variant` 同时给出时须一致；走子历史从空开始）。
     #[serde(default)]
@@ -43,8 +50,15 @@ pub struct ModelBindReq {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SettingsReq {
-    /// 默认 MCTS 搜索预算（模拟次数，运行时生效；至少 1）
-    pub mcts_sims: usize,
+    /// 默认 MCTS 搜索预算（模拟次数，运行时生效；至少 1）。缺省不修改。
+    #[serde(default)]
+    pub mcts_sims: Option<usize>,
+    /// 默认 NNUE 搜索深度（运行时生效；至少 1）。缺省不修改。
+    #[serde(default)]
+    pub nnue_depth: Option<i32>,
+    /// 默认 NNUE 节点预算（运行时生效；至少 1）。缺省不修改。
+    #[serde(default)]
+    pub nnue_budget: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -73,8 +87,15 @@ pub struct EngineMoveReq {
     /// MCTS 模拟次数；缺省时取服务器当前默认值
     #[serde(default)]
     pub mcts_sims: Option<usize>,
-    /// ONNX 模型文件（须在模型目录内）。缺省时按变体 ID 自动匹配
-    /// 唯一文件名候选（如 `dark_chess_4x8.onnx`）；无法唯一确定时报错。
+    /// NNUE 搜索深度（仅 `.nnue` 模型生效）；缺省时取服务器当前默认值
+    #[serde(default)]
+    pub nnue_depth: Option<i32>,
+    /// NNUE 节点预算（仅 `.nnue` 模型生效）；缺省时取服务器当前默认值
+    #[serde(default)]
+    pub nnue_budget: Option<u64>,
+    /// 模型文件（须在模型目录内，`.onnx` / `.nnue` 均可；推理后端由扩展名决定）。
+    /// 缺省时按变体 ID 自动匹配唯一文件名候选（如 `dark_chess_4x8.onnx`）；
+    /// 无法唯一确定时报错。
     #[serde(default)]
     pub model_file: Option<String>,
 }
@@ -129,8 +150,17 @@ pub struct AiInfoView {
     /// AI 执子方："red" / "black"（未启用时为 null）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub player: Option<String>,
-    /// MCTS 模拟次数
+    /// 推理后端："mcts-onnx" / "nnue"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub engine: Option<String>,
+    /// MCTS 模拟次数（MctsOnnx 后端）
     pub mcts_sims: usize,
+    /// NNUE 搜索深度（Nnue 后端）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nnue_depth: Option<i32>,
+    /// NNUE 节点预算（Nnue 后端）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nnue_budget: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -252,15 +282,36 @@ impl MctsStatsDto {
     }
 }
 
+/// 一次 NNUE Expectimax 搜索统计（对齐 Tauri 后端 NNUE 对手语义）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NnueStatsDto {
+    /// 推理后端标识（恒为 "nnue"）
+    pub engine: String,
+    /// 请求的迭代加深深度上限
+    pub depth: i32,
+    /// 请求的节点预算
+    pub budget: u64,
+    /// 实际消耗的节点数
+    pub nodes: u64,
+    /// 完成的最深迭代层数
+    pub reached_depth: i32,
+    /// 搜索本体耗时（毫秒）
+    pub elapsed_ms: u64,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MoveResp {
     pub state: GameStateResp,
     /// 本次请求实际执行的动作序列（人类 1 步 + 可能的 AI 回应 1 步）
     pub actions: Vec<AppliedAction>,
-    /// AI 回合的 MCTS 搜索统计（本请求含 AI 落子时才有）
+    /// AI 回合的 MCTS 搜索统计（本请求含 MctsOnnx AI 落子时才有）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mcts_stats: Option<MctsStatsDto>,
+    /// AI 回合的 NNUE 搜索统计（本请求含 Nnue AI 落子时才有）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nnue_stats: Option<NnueStatsDto>,
 }
 
 #[derive(Debug, Serialize)]
@@ -315,6 +366,10 @@ pub struct VariantsResp {
 pub struct SettingsResp {
     /// 当前默认 MCTS 搜索预算（模拟次数）
     pub mcts_sims: usize,
+    /// 当前默认 NNUE 搜索深度
+    pub nnue_depth: i32,
+    /// 当前默认 NNUE 节点预算
+    pub nnue_budget: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -337,7 +392,7 @@ pub struct HealthResp {
     pub nn_cache_entries: usize,
 }
 
-/// POST /api/engine/move 响应：给定局面的 MCTS+ONNX 决策（不落子、无会话状态）。
+/// POST /api/engine/move 响应：给定局面的引擎决策（不落子、无会话状态）。
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EngineMoveResp {
@@ -355,8 +410,12 @@ pub struct EngineMoveResp {
     pub is_chance: bool,
     /// 是否纯翻棋（action < reveal_actions_count；翻棋必为机会动作）
     pub is_flip: bool,
-    /// 本次搜索统计
-    pub mcts_stats: MctsStatsDto,
+    /// MCTS+ONNX 路径的搜索统计（模型为 .onnx 时）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mcts_stats: Option<MctsStatsDto>,
+    /// NNUE 路径的搜索统计（模型为 .nnue 时）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nnue_stats: Option<NnueStatsDto>,
 }
 
 // ============================================================================
