@@ -9,8 +9,8 @@ name = "banqi-server"
 path = "src/main.rs"
 
 [dependencies]
-banqi-core = { path = "../banqi-core" }
-banqi-engine = { path = "../banqi-engine" }
+banqi-core.workspace = true
+banqi-engine.workspace = true
 
 axum = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
@@ -25,8 +25,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rust-embed = "8"
 mime_guess = "2.0"
 
-# 仅用于加载期校验模型输入维度与变体特征维度（精确锁定，与 banqi-engine 的 rc.13 API 对齐）
-ort = { version = "=2.0.0-rc.13", features = ["download-binaries"], optional = true }
+# 仅用于加载期校验模型输入维度与变体特征维度（版本在根 workspace 精确锁定 rc.13）
+ort = { workspace = true, optional = true }
 
 [features]
 default = ["onnx"]
@@ -34,8 +34,3 @@ default = ["onnx"]
 torch = ["banqi-engine/torch"]
 onnx = ["banqi-engine/onnx", "dep:ort"]
 onnx-cuda = ["onnx", "banqi-engine/onnx-cuda"]
-
-[profile.release]
-opt-level = 3
-lto = true
-codegen-units = 1
