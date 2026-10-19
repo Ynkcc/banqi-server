@@ -23,14 +23,15 @@ use banqi_engine::nnue::NnueEvaluator;
 
 use crate::dto::{player_str, AppliedAction, GameStateResp, NnueStatsDto};
 #[cfg(feature = "onnx")]
-use crate::mcts::{self, MctsTree, MctsTreeBox, tree_stats};
+use crate::mcts::MctsTreeBox;
 use crate::error::ApiError;
 use crate::state::{AppState, EngineKind};
 
 /// 在 blocking 线程池内执行一次 MCTS+ONNX 决策，并保留整棵搜索树。
 ///
-/// 变体无关：由 `(变体, 快照)` 重建泛型环境后运行 `GumbelMCTS`（机会节点由
-/// core 内部处理）。返回 `(选择的动作, 变体擦除后的树)`。
+/// 变体无关：由 `(变体, 快照)` 重建泛型环境后运行 Gumbel MCTS（机会节点由
+/// core 内部处理）。搜索核心在 `banqi_app::search::run_gumbel`（单一真源）。
+/// 返回 `(选择的动作, 变体擦除后的树)`。
 #[cfg(feature = "onnx")]
 pub(crate) async fn choose_blocking(
     variant: Variant,
@@ -42,31 +43,13 @@ pub(crate) async fn choose_blocking(
         with_env!(variant, &snap, env => {
             (|| -> Result<Option<(usize, MctsTreeBox)>, String> {
                 let evaluator = OnnxEvaluator::<E>::new(model.clone());
-                let config = GumbelConfig::for_play(sims);
-                let mut mcts = banqi_core::core::mcts::GumbelMCTS::new(&env, &evaluator, config);
-                let pre_visits = mcts.arena.get(mcts.root_idx).visit_count;
-                let started = std::time::Instant::now();
-                let result = mcts
-                    .run()
-                    .map_err(|e| format!("MCTS+ONNX 决策失败: {e}"))?
-                    .ok_or_else(|| "MCTS 未返回动作（无合法动作）".to_string())?;
-                let elapsed_ms = started.elapsed().as_millis() as u64;
-                let (max_depth, nodes) = tree_stats(&mcts.arena, mcts.root_idx);
-                let stats = mcts::MctsSearchStats {
-                    reused: false,
-                    budget: sims.max(1),
-                    actual_sims: result.root_visit_count.saturating_sub(pre_visits),
-                    max_depth,
-                    nodes,
-                    elapsed_ms,
-                };
-                let tree: MctsTree<E> = MctsTree {
-                    arena: mcts.arena,
-                    root_idx: mcts.root_idx,
-                    chosen_action: result.action,
-                    stats,
-                };
-                Ok(Some((result.action, Box::new(tree) as MctsTreeBox)))
+                let tree = banqi_app::search::run_gumbel(
+                    &env,
+                    &evaluator,
+                    GumbelConfig::for_play(sims),
+                    None,
+                )?;
+                Ok(Some((tree.chosen_action, Box::new(tree) as MctsTreeBox)))
             })()
         })
     })
@@ -80,8 +63,8 @@ pub(crate) async fn choose_blocking(
 /// 在 blocking 线程池内执行一次 Expectimax+NNUE 决策。
 ///
 /// `DarkChessEnv::from_snapshot` 按快照自带变体配置重建环境（所有变体通用），
-/// 搜索入口以实际 config 校验 `.nnue` 头部布局（跨变体权重硬失败）。
-/// 返回 `(选择的动作, 搜索统计)`。
+/// 搜索核心在 `banqi_app::search::nnue_search`（含 `.nnue` 头部布局校验，
+/// 跨变体权重硬失败）。返回 `(选择的动作, 搜索统计)`。
 pub(crate) async fn choose_nnue_blocking(
     snap: banqi_core::core::env::PositionSnapshot,
     evaluator: Arc<NnueEvaluator>,
@@ -93,32 +76,22 @@ pub(crate) async fn choose_nnue_blocking(
 
         let env = DarkChessEnv::from_snapshot(&snap)
             .map_err(|e| format!("重建环境失败: {e}"))?;
-        evaluator
-            .validate_layout(&env.config)
-            .map_err(|e| format!(".nnue 权重与当前变体布局不匹配: {e}"))?;
-        let cfg = banqi_core::core::expectimax::SearchConfig {
-            node_budget: budget,
-            max_depth: depth,
-            nnue_evaluator: Some(evaluator),
-            ..Default::default()
-        };
-        let started = std::time::Instant::now();
-        let result = banqi_core::core::expectimax::search(&env, &cfg)
-            .ok_or_else(|| "Expectimax 未返回动作（无合法动作）".to_string())?;
-        let elapsed_ms = started.elapsed().as_millis() as u64;
-        let stats = NnueStatsDto {
-            engine: "nnue".to_string(),
-            depth,
-            budget,
-            nodes: result.nodes,
-            reached_depth: result.depth,
-            elapsed_ms,
-        };
-        Ok((result.action, stats))
+        banqi_app::search::nnue_search(&env, evaluator, depth, budget)
     })
     .await
     .map_err(|e| format!("blocking 任务 join 失败: {e}"))?;
-    joined
+    let (action, stats) = joined?;
+    Ok((
+        action,
+        NnueStatsDto {
+            engine: "nnue".to_string(),
+            depth: stats.depth,
+            budget: stats.budget,
+            nodes: stats.nodes,
+            reached_depth: stats.reached_depth,
+            elapsed_ms: stats.elapsed_ms,
+        },
+    ))
 }
 
 /// AI 决策所需数据（锁 1 内取出，不跨 await）。

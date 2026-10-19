@@ -9,8 +9,10 @@ name = "banqi-server"
 path = "src/main.rs"
 
 [dependencies]
-banqi-core.workspace = true
-banqi-engine.workspace = true
+banqi-core = { path = "../banqi-core" }
+banqi-engine = { path = "../banqi-engine" }
+# 共享应用层：MCTS 树视图 / 搜索执行 / 模型扫描（收敛 gui-server 重复逻辑）
+banqi-app = { path = "../banqi-app" }
 
 axum = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
@@ -25,12 +27,13 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rust-embed = "8"
 mime_guess = "2.0"
 
-# 仅用于加载期校验模型输入维度与变体特征维度（版本在根 workspace 精确锁定 rc.13）
-ort = { workspace = true, optional = true }
+# 仅用于加载期校验模型输入维度与变体特征维度（精确锁定 rc.13，与 banqi-engine 的 ort API 对齐；
+# 升级 ort 时须与 banqi-engine 的版本声明同步修改）
+ort = { version = "=2.0.0-rc.13", features = ["download-binaries"], optional = true }
 
 [features]
 default = ["onnx"]
 # 透传到底层推理库的 feature（与 banqi-engine 对齐）
-torch = ["banqi-engine/torch"]
-onnx = ["banqi-engine/onnx", "dep:ort"]
+torch = ["banqi-engine/torch", "banqi-app/torch"]
+onnx = ["banqi-engine/onnx", "dep:ort", "banqi-app/onnx"]
 onnx-cuda = ["onnx", "banqi-engine/onnx-cuda"]

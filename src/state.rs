@@ -109,9 +109,7 @@ impl Models {
     }
 
     fn rescan(&self) {
-        let mut paths: Vec<std::path::PathBuf> = Vec::new();
-        collect_model_files(&self.models_dir, 0, &mut paths);
-        paths.sort();
+        let paths = banqi_app::models::scan_model_files(&self.models_dir, &["onnx", "nnue"], 4);
         let files: Vec<String> = paths
             .into_iter()
             .map(|p| p.to_string_lossy().to_string())
@@ -191,6 +189,7 @@ impl Models {
     pub fn loaded_files(&self) -> Vec<(String, bool)> {
         self.files();
         let loaded_keys: std::collections::HashSet<String> = {
+            #[cfg_attr(not(feature = "onnx"), allow(unused_mut))]
             let mut set: std::collections::HashSet<String> = self
                 .loaded_nnue
                 .lock()
@@ -214,35 +213,6 @@ impl Models {
             .iter()
             .map(|f| (f.clone(), loaded_keys.contains(f)))
             .collect()
-    }
-}
-
-/// 递归收集目录下的 `*.onnx` / `*.nnue`（深度限制 4 层，与 banqi-gui 的模型扫描口径一致）。
-fn collect_model_files(dir: &Path, depth: usize, out: &mut Vec<std::path::PathBuf>) {
-    if depth > 4 {
-        return;
-    }
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        if depth == 0 {
-            tracing::warn!("模型目录不可读 ({}), 所有变体 AI 均不可用", dir.display());
-        }
-        return;
-    };
-    for e in entries.flatten() {
-        let path = e.path();
-        match e.file_type() {
-            Ok(ft) if ft.is_dir() => collect_model_files(&path, depth + 1, out),
-            Ok(ft)
-                if ft.is_file()
-                    && matches!(
-                        path.extension().and_then(|x| x.to_str()),
-                        Some("onnx") | Some("nnue")
-                    ) =>
-            {
-                out.push(path);
-            }
-            _ => {}
-        }
     }
 }
 
