@@ -1,6 +1,10 @@
-# 性能基线：x86-64-v3（AVX2 + FMA，Haswell 2013+ 普遍支持）。
-# NNUE 前向传播的 FC1 矩阵乘依赖 SIMD；默认 target（SSE2 基线）实测使
-# NNUE 搜索仅 160k NPS（forward_accumulator 占 96% CPU）。
-# 注意：产物不兼容 v3 之前的旧 CPU（<2013）。
-[build]
+# 编译基线按目标架构分派（与 banqi-engine 的同名配置保持一致）。
+#
+# x86_64：v3（AVX2 + FMA）。搜索/环境热路径（位棋盘、走子生成、惰性物化）
+# 同样受益。注意：产物不兼容 v3 之前的旧 CPU（<2013）。
+#
+# aarch64：不设额外 flag——NEON（asimd）是 aarch64 目标的强制基线，
+# 自动向量化可直接使用，产物兼容全部 ARMv8-A+ 设备。目标机本机编译时可
+# 叠加 `-C target-cpu=native` 进一步调优。
+[target.'cfg(target_arch = "x86_64")']
 rustflags = ["-C", "target-cpu=x86-64-v3"]
