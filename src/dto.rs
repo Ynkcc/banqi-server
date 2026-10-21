@@ -12,7 +12,14 @@ pub struct CreateGameReq {
     /// 棋盘变体
     #[serde(default)]
     pub variant: Option<String>,
-    /// 是否启用 AI 对手（默认 true）
+    /// 对手类型："PvP"（本地双人）/ "Random" / "RevealFirst" / "CaptureFirst" /
+    /// "Engine"（纯计算强引擎）/ "Nnue" / "MctsOnnx"。
+    /// 显式给出时优先生效；缺省时按传统语义回退：
+    /// `aiEnabled=false` → PvP，`aiEnabled=true`（默认）→ 由绑定模型文件决定
+    /// （`.nnue` → Nnue，其余 → MctsOnnx）。
+    #[serde(default)]
+    pub opponent: Option<String>,
+    /// 是否启用 AI 对手（仅 `opponent` 缺省时的传统语义；默认 true）
     #[serde(default)]
     pub ai_enabled: Option<bool>,
     /// AI 执子方："red" / "black" / "auto"（默认 "auto" = AI 执黑，人类执红先行）
@@ -22,8 +29,12 @@ pub struct CreateGameReq {
     /// 调整会实时同步到本对局），显式指定后固定不变
     #[serde(default)]
     pub mcts_sims: Option<usize>,
+    /// Expectimax 强引擎节点预算（仅 Engine 对手生效）；缺省时取服务器当前默认值。
+    #[serde(default)]
+    pub engine_budget: Option<u64>,
     /// 显式绑定的模型文件（用户从 /api/health 模型清单中选择；须在模型目录内）。
-    /// 缺省自动匹配；同变体存在多个候选模型时自动匹配报歧义错误，必须显式指定。
+    /// 仅模型类对手（Nnue / MctsOnnx）需要；缺省自动匹配；同变体存在多个候选
+    /// 模型时自动匹配报歧义错误，必须显式指定。
     /// 推理后端由扩展名决定：`.nnue` → Expectimax+NNUE，其余 → MCTS+ONNX。
     #[serde(default)]
     pub model_file: Option<String>,
@@ -53,6 +64,9 @@ pub struct SettingsReq {
     /// 默认 MCTS 搜索预算（模拟次数，运行时生效；至少 1）。缺省不修改。
     #[serde(default)]
     pub mcts_sims: Option<usize>,
+    /// 默认 Expectimax 强引擎节点预算（运行时生效；至少 1）。缺省不修改。
+    #[serde(default)]
+    pub engine_budget: Option<u64>,
     /// 默认 NNUE 搜索深度（运行时生效；至少 1）。缺省不修改。
     #[serde(default)]
     pub nnue_depth: Option<i32>,
@@ -147,14 +161,20 @@ pub struct ActionView {
 #[serde(rename_all = "camelCase")]
 pub struct AiInfoView {
     pub enabled: bool,
-    /// AI 执子方："red" / "black"（未启用时为 null）
+    /// 对手种类："PvP" / "Random" / "RevealFirst" / "CaptureFirst" / "Engine" /
+    /// "Nnue" / "MctsOnnx"（与前端 Opponent 枚举一致；PvP 时 enabled=false）
+    pub kind: String,
+    /// 对手执子方："red" / "black"（未启用时为 null）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub player: Option<String>,
-    /// 推理后端："mcts-onnx" / "nnue"
+    /// 推理后端："mcts-onnx" / "nnue"（仅模型类对手给出）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub engine: Option<String>,
     /// MCTS 模拟次数（MctsOnnx 后端）
     pub mcts_sims: usize,
+    /// Expectimax 强引擎节点预算（Engine 对手）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub engine_budget: Option<u64>,
     /// NNUE 搜索深度（Nnue 后端）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nnue_depth: Option<i32>,
@@ -366,6 +386,8 @@ pub struct VariantsResp {
 pub struct SettingsResp {
     /// 当前默认 MCTS 搜索预算（模拟次数）
     pub mcts_sims: usize,
+    /// 当前默认 Expectimax 强引擎节点预算
+    pub engine_budget: u64,
     /// 当前默认 NNUE 搜索深度
     pub nnue_depth: i32,
     /// 当前默认 NNUE 节点预算

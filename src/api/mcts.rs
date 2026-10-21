@@ -92,7 +92,11 @@ pub async fn search(
         let s = games
             .get(&game_id)
             .ok_or_else(|| ApiError::GameNotFound(id.clone()))?;
-        let sims = s.ai.as_ref().map(|a| a.mcts_sims).unwrap_or_else(|| app.default_sims());
+        let sims = s
+            .opponent
+            .as_ref()
+            .map(|o| o.mcts_sims)
+            .unwrap_or_else(|| app.default_sims());
         let model_file = s.model_file.clone().ok_or_else(|| {
             ApiError::BadRequest(
                 "对局未绑定模型文件，无法执行搜索（创建对局时指定 modelFile 或 PUT /api/games/:id/model 绑定）"

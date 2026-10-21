@@ -1,12 +1,15 @@
-//! AI 决策：`spawn_blocking` 包装 MCTS+ONNX / Expectimax+NNUE 推理，含版本号校验。
+//! 对手回合执行：规则对手 / Engine / NNUE / MCTS+ONNX 的决策与落子。
 //!
-//! 锁纪律：handler 在锁内完成人类走子并克隆快照后立即释放锁；搜索在
-//! blocking 线程池用快照重建的泛型环境执行（`with_env!`，变体无关）；
-//! 完成后重取锁校验版本号，不一致则丢弃 AI 结果。
+//! 锁纪律：handler 在锁内完成人类走子并校验版本号后立即释放锁；搜索类对手
+//! 在 blocking 线程池用快照重建的泛型环境执行（`with_env!`，变体无关）；
+//! 规则对手决策廉价，直接在锁内同步完成；完成后重取锁校验版本号，
+//! 不一致则丢弃对手结果。
 //!
-//! 推理后端由对局绑定模型文件的扩展名决定（`EngineKind`）：
-//! - `.onnx` → Gumbel MCTS + ONNX 策略/价值网络（需 onnx feature）；
-//! - `.nnue` → 迭代加深 Expectimax + NNUE 叶评估（量化前向，无外部依赖）。
+//! 对手种类由 `banqi_app::opponent::OpponentKind` 给出（单一真源）：
+//! - Rule（Random / RevealFirst / CaptureFirst）：`choose_simple` 锁内同步决策，无模型；
+//! - Engine：Expectimax 强引擎（`choose_simple`），blocking 线程池执行，无模型；
+//! - Nnue：迭代加深 Expectimax + NNUE 叶评估（量化前向，无外部依赖）；
+//! - MctsOnnx：Gumbel MCTS + ONNX 策略/价值网络（需 onnx feature）。
 
 use std::sync::Arc;
 
@@ -14,6 +17,7 @@ use uuid::Uuid;
 
 #[cfg(feature = "onnx")]
 use banqi_app::with_env;
+use banqi_app::opponent::{OpponentKind, SimpleKind};
 use banqi_app::sync::{read_lock, write_lock};
 use banqi_core::core::env::DarkChessEnv;
 #[cfg(feature = "onnx")]
@@ -24,11 +28,11 @@ use banqi_core::core::mcts::GumbelConfig;
 use banqi_engine::inference::onnx::{OnnxEvaluator, OnnxModel};
 use banqi_engine::nnue::NnueEvaluator;
 
-use crate::dto::{player_str, AppliedAction, GameStateResp, NnueStatsDto};
+use crate::dto::{player_str, AppliedAction, GameStateResp, MctsStatsDto, NnueStatsDto};
 #[cfg(feature = "onnx")]
 use crate::mcts::MctsTreeBox;
 use crate::error::ApiError;
-use crate::state::{AppState, EngineKind};
+use crate::state::{AppState, OpponentConfig};
 
 /// 在 blocking 线程池内执行一次 MCTS+ONNX 决策，并保留整棵搜索树。
 ///
@@ -69,7 +73,7 @@ pub(crate) async fn choose_blocking(
 /// 搜索核心在 `banqi_app::search::nnue_search`（含 `.nnue` 头部布局校验，
 /// 跨变体权重硬失败）。返回 `(选择的动作, 搜索统计)`。
 pub(crate) async fn choose_nnue_blocking(
-    snap: banqi_core::core::env::PositionSnapshot,
+    snap: PositionSnapshot,
     evaluator: Arc<NnueEvaluator>,
     depth: i32,
     budget: u64,
@@ -97,34 +101,39 @@ pub(crate) async fn choose_nnue_blocking(
     ))
 }
 
-/// AI 决策所需数据（锁 1 内取出，不跨 await）。
-struct AiTurnPlan {
+/// 对手回合决策所需数据（锁 1 内取出，不跨 await）。
+struct TurnPlan {
     #[cfg(feature = "onnx")]
-    variant: banqi_core::core::env::Variant,
+    variant: Variant,
     snap: banqi_core::core::env::PositionSnapshot,
-    engine: EngineKind,
-    model_file: String,
-    #[cfg(feature = "onnx")]
+    kind: OpponentKind,
+    model_file: Option<String>,
     mcts_sims: usize,
+    engine_budget: u64,
     nnue_depth: i32,
     nnue_budget: u64,
+    /// 规则对手：锁内已完成的同步决策结果（其余对手为 None）
+    ready_action: Option<usize>,
 }
 
 /// 锁 1：校验状态并取出决策所需数据，立即释放（不跨 await）。
-fn plan_ai_turn(
+///
+/// 规则对手决策廉价，直接在此锁内同步完成（`ready_action`）；
+/// 其余对手仅取出参数，搜索在锁外执行。
+fn plan_opponent_turn(
     app: &AppState,
     game_id: Uuid,
     expect_version: u64,
-) -> Result<AiTurnPlan, ApiError> {
+) -> Result<TurnPlan, ApiError> {
     let games = read_lock(&app.games);
     let s = games
         .get(&game_id)
         .ok_or_else(|| ApiError::GameNotFound(game_id.to_string()))?;
-    let ai = s.ai.ok_or(ApiError::AiDisabled)?;
+    let opp: OpponentConfig = s.opponent.ok_or(ApiError::AiDisabled)?;
     if s.over_state().0 || s.over_state().1 {
         return Err(ApiError::GameOver);
     }
-    if !s.ai_to_move() {
+    if !s.opponent_to_move() {
         return Err(ApiError::NotAiTurn);
     }
     if s.core.version != expect_version {
@@ -133,65 +142,149 @@ fn plan_ai_turn(
             s.core.version
         )));
     }
-    let model_file = s
-        .model_file
-        .clone()
-        .ok_or_else(|| ApiError::BadRequest("对局未绑定模型文件".into()))?;
-    Ok(AiTurnPlan {
+    let plan = TurnPlan {
         #[cfg(feature = "onnx")]
         variant: s.core.variant,
         snap: s.core.current.clone(),
-        engine: ai.engine,
-        model_file,
-        #[cfg(feature = "onnx")]
-        mcts_sims: ai.mcts_sims,
-        nnue_depth: ai.nnue_depth,
-        nnue_budget: ai.nnue_budget,
-    })
+        kind: opp.kind,
+        model_file: s.model_file.clone(),
+        mcts_sims: opp.mcts_sims,
+        engine_budget: opp.engine_budget,
+        nnue_depth: opp.nnue_depth,
+        nnue_budget: opp.nnue_budget,
+        ready_action: None,
+    };
+    if let OpponentKind::Rule(rule) = opp.kind {
+        let action = banqi_app::opponent::choose_simple(
+            SimpleKind::Rule(rule),
+            &s.core.current,
+            opp.engine_budget,
+        )
+        .map_err(ApiError::Internal)?;
+        return Ok(TurnPlan {
+            ready_action: Some(action),
+            ..plan
+        });
+    }
+    Ok(plan)
 }
 
-/// 执行一轮 AI 走子（供「人类走子后自动 AI 回合」与「强制 AI 走子」共用）。
+/// 锁 2：校验版本号后落子（供全部对手路径共用）。
 ///
-/// - `expect_version`：调用方在锁内看到并准备给 AI 用的版本号；推理完成后
-///   重取锁校验，若期间发生过任何状态变更（走子/悔棋），AI 结果作废。
-///
-/// 返回 `Ok(Some(...))` = AI 已落子；`Ok(None)` = 版本号变化，AI 结果被丢弃
+/// 返回 `Ok(Some(...))` = 已落子；`Ok(None)` = 版本号变化，结果被丢弃
 /// （正常竞态，不视为错误）。
-pub async fn run_ai_turn(
+fn apply_opponent_action(
     app: &Arc<AppState>,
     game_id: Uuid,
     expect_version: u64,
-) -> Result<Option<(GameStateResp, AppliedAction, Option<crate::dto::MctsStatsDto>, Option<NnueStatsDto>)>, ApiError> {
-    let plan = plan_ai_turn(app, game_id, expect_version)?;
+    action: usize,
+    mcts_tree: Option<crate::mcts::MctsTreeBox>,
+    nnue_stats: Option<NnueStatsDto>,
+) -> Result<Option<(GameStateResp, AppliedAction, Option<MctsStatsDto>, Option<NnueStatsDto>)>, ApiError> {
+    let mut games = write_lock(&app.games);
+    let s = games
+        .get_mut(&game_id)
+        .ok_or_else(|| ApiError::GameNotFound(game_id.to_string()))?;
+    if s.core.version != expect_version {
+        tracing::info!(
+            game = %game_id,
+            "对手结果作废: 版本号 {expect_version} != {}（期间对局已被修改）",
+            s.core.version
+        );
+        return Ok(None);
+    }
+    if !s.opponent_to_move() {
+        // 版本号一致但行棋方已不是对手（理论上不该发生，防御性处理）
+        return Ok(None);
+    }
+    let view = s.action_view(action);
+    let player = s.core.current.current_player;
+    let outcome = s.apply_action(action)?;
+    // 保留本次搜索树供前端查询（下一步对局状态变更后仍可浏览，直到下次搜索替换；
+    // 非搜索类对手落子后清空旧树避免展示过期决策）
+    s.mcts_tree = mcts_tree;
+    let mcts_stats = MctsStatsDto::from_session(s.mcts_tree.as_ref());
+    tracing::debug!(game = %game_id, "对手落子: action={action}，终局={}", outcome.is_over());
+    Ok(Some((
+        s.view(game_id),
+        AppliedAction {
+            player: player_str(player),
+            action: view,
+        },
+        mcts_stats,
+        nnue_stats,
+    )))
+}
 
-    // 锁外搜索（blocking 线程池，按后端分派）
-    let (action, mcts_tree, nnue_stats) = match plan.engine {
-        EngineKind::Nnue => {
+/// 执行一轮对手走子（供「人类走子后自动对手回合」与「强制对手走子」共用）。
+///
+/// - `expect_version`：调用方在锁内看到并准备给对手用的版本号；决策完成后
+///   重取锁校验，若期间发生过任何状态变更（走子/悔棋），结果作废。
+///
+/// 返回 `Ok(Some(...))` = 对手已落子；`Ok(None)` = 版本号变化，结果被丢弃。
+pub async fn run_opponent_turn(
+    app: &Arc<AppState>,
+    game_id: Uuid,
+    expect_version: u64,
+) -> Result<Option<(GameStateResp, AppliedAction, Option<MctsStatsDto>, Option<NnueStatsDto>)>, ApiError> {
+    let plan = plan_opponent_turn(app, game_id, expect_version)?;
+
+    // 规则对手：锁内已完成决策，直接落子
+    if let Some(action) = plan.ready_action {
+        return apply_opponent_action(app, game_id, expect_version, action, None, None);
+    }
+
+    // 锁外搜索（blocking 线程池，按对手种类分派）
+    let (action, mcts_tree, nnue_stats) = match plan.kind {
+        // 已在锁 1 处理，防御性兜底
+        OpponentKind::Rule(_) => return Ok(None),
+        OpponentKind::Engine => {
+            let snap = plan.snap;
+            let budget = plan.engine_budget;
+            let action = tokio::task::spawn_blocking(move || {
+                banqi_app::opponent::choose_simple(SimpleKind::Engine, &snap, budget)
+            })
+            .await
+            .map_err(|e| ApiError::Internal(format!("blocking 任务 join 失败: {e}")))?
+            .map_err(ApiError::Internal)?;
+            (action, None, None)
+        }
+        OpponentKind::Nnue => {
+            let model_file = plan
+                .model_file
+                .clone()
+                .ok_or_else(|| ApiError::BadRequest("对局未绑定模型文件".into()))?;
             let evaluator = app
-                .acquire_nnue_model(plan.model_file)
+                .acquire_nnue_model(model_file)
                 .await
                 .map_err(ApiError::ModelUnavailable)?;
-            let (action, stats) = choose_nnue_blocking(plan.snap, evaluator, plan.nnue_depth, plan.nnue_budget)
-                .await
-                .map_err(ApiError::Internal)?;
+            let (action, stats) =
+                choose_nnue_blocking(plan.snap, evaluator, plan.nnue_depth, plan.nnue_budget)
+                    .await
+                    .map_err(ApiError::Internal)?;
             (action, None, Some(stats))
         }
-        EngineKind::MctsOnnx => {
+        OpponentKind::MctsOnnx => {
             #[cfg(not(feature = "onnx"))]
             {
                 return Err(ApiError::ModelUnavailable(
-                    "服务编译未启用 onnx 推理，MCTS+ONNX 对手不可用（.nnue 对手仍可用）".into(),
+                    "服务编译未启用 onnx 推理，MCTS+ONNX 对手不可用（其余对手仍可用）".into(),
                 ));
             }
             #[cfg(feature = "onnx")]
             {
+                let model_file = plan
+                    .model_file
+                    .clone()
+                    .ok_or_else(|| ApiError::BadRequest("对局未绑定模型文件".into()))?;
                 let model = app
-                    .acquire_model(plan.model_file)
+                    .acquire_model(model_file)
                     .await
                     .map_err(ApiError::ModelUnavailable)?;
-                let Some((action, tree)) = choose_blocking(plan.variant, plan.snap, model, plan.mcts_sims)
-                    .await
-                    .map_err(ApiError::Internal)?
+                let Some((action, tree)) =
+                    choose_blocking(plan.variant, plan.snap, model, plan.mcts_sims)
+                        .await
+                        .map_err(ApiError::Internal)?
                 else {
                     return Err(ApiError::Internal(
                         "MCTS 未返回动作（终局判定与状态不一致）".to_string(),
@@ -202,38 +295,5 @@ pub async fn run_ai_turn(
         }
     };
 
-    // 锁 2：校验版本号后落子
-    let mut games = write_lock(&app.games);
-    let s = games
-        .get_mut(&game_id)
-        .ok_or_else(|| ApiError::GameNotFound(game_id.to_string()))?;
-    if s.core.version != expect_version {
-        tracing::info!(
-            game = %game_id,
-            "AI 结果作废: 版本号 {expect_version} != {}（期间对局已被修改）",
-            s.core.version
-        );
-        return Ok(None);
-    }
-    if !s.ai_to_move() {
-        // 版本号一致但行棋方已不是 AI（理论上不该发生，防御性处理）
-        return Ok(None);
-    }
-    let view = s.action_view(action);
-    let player = s.core.current.current_player;
-    let outcome = s.apply_action(action)?;
-    // 保留本次搜索树供前端查询（下一步对局状态变更后仍可浏览，直到下次搜索替换；
-    // NNUE 对手无搜索树，落子后清空旧树避免展示过期决策）
-    s.mcts_tree = mcts_tree;
-    let mcts_stats = crate::dto::MctsStatsDto::from_session(s.mcts_tree.as_ref());
-    tracing::debug!(game = %game_id, engine = ?plan.engine, "AI 落子: action={action}，终局={}", outcome.is_over());
-    Ok(Some((
-        s.view(game_id),
-        AppliedAction {
-            player: player_str(player),
-            action: view,
-        },
-        mcts_stats,
-        nnue_stats,
-    )))
+    apply_opponent_action(app, game_id, expect_version, action, mcts_tree, nnue_stats)
 }

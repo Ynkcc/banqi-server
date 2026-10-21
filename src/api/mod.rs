@@ -75,10 +75,12 @@ async fn variants() -> Json<VariantsResp> {
     })
 }
 
-/// GET /api/settings：读取运行时可调的服务端设置（默认 MCTS 搜索预算 / NNUE 深度与预算）。
+/// GET /api/settings：读取运行时可调的服务端设置（默认 MCTS 搜索预算 /
+/// 强引擎节点预算 / NNUE 深度与预算）。
 async fn get_settings(State(app): State<SharedState>) -> Json<SettingsResp> {
     Json(SettingsResp {
         mcts_sims: app.default_sims(),
+        engine_budget: app.default_engine_budget(),
         nnue_depth: app.default_nnue_depth(),
         nnue_budget: app.default_nnue_budget(),
     })
@@ -94,6 +96,10 @@ async fn put_settings(
         Some(v) => app.set_default_sims(v),
         None => app.default_sims(),
     };
+    let engine_budget = match req.engine_budget {
+        Some(v) => app.set_default_engine_budget(v),
+        None => app.default_engine_budget(),
+    };
     let nnue_depth = match req.nnue_depth {
         Some(v) => app.set_default_nnue_depth(v),
         None => app.default_nnue_depth(),
@@ -103,10 +109,11 @@ async fn put_settings(
         None => app.default_nnue_budget(),
     };
     tracing::info!(
-        "运行时调整默认引擎参数: mcts_sims={mcts_sims}, nnue_depth={nnue_depth}, nnue_budget={nnue_budget}"
+        "运行时调整默认引擎参数: mcts_sims={mcts_sims}, engine_budget={engine_budget}, nnue_depth={nnue_depth}, nnue_budget={nnue_budget}"
     );
     Json(SettingsResp {
         mcts_sims,
+        engine_budget,
         nnue_depth,
         nnue_budget,
     })

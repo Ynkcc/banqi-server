@@ -16,8 +16,8 @@ pub enum ApiError {
     /// 对局已结束，不能再走子/悔棋
     #[error("对局已结束")]
     GameOver,
-    /// 对局未启用 AI 对手
-    #[error("对局未启用 AI 对手")]
+    /// 对局未启用对手（本地双人 PvP）
+    #[error("对局未启用对手（本地双人模式）")]
     AiDisabled,
     /// 该对局暂无 MCTS 搜索树（AI 未走过子且未手动搜索）
     #[error("暂无 MCTS 搜索树：等待 AI 走子或 POST /mcts/search")]
@@ -25,8 +25,8 @@ pub enum ApiError {
     /// 通用请求错误（参数非法 / 历史不足等）
     #[error("{0}")]
     BadRequest(String),
-    /// 当前轮到人类玩家，不能强制 AI 走子
-    #[error("当前轮到人类玩家")]
+    /// 当前轮到人类玩家，不能强制对手走子
+    #[error("当前轮到人类玩家，不能强制对手走子")]
     NotAiTurn,
     /// ONNX 模型未加载（与请求变体不匹配或加载失败）
     #[error("ONNX 模型不可用: {0}")]

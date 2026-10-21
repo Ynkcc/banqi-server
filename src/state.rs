@@ -1,8 +1,8 @@
-//! 应用状态：模型池（按变体，随用随加载）、对局存储与会话（AI 配置 + 版本号）。
+//! 应用状态：模型池（按变体，随用随加载）、对局存储与会话（对手配置 + 版本号）。
 //!
 //! 会话核心（变体 / 局面快照 / 悔棋 / 棋谱不变量）为 `banqi_app::session::SnapshotSession`
 //! （单一真源，经 `with_env!` 重建泛型环境执行——server 侧不假设变体种类）；
-//! 本 crate 的 `GameSession` 在其上叠加 server 特有的 AI 配置、绑定模型与搜索树。
+//! 本 crate 的 `GameSession` 在其上叠加 server 特有的对手配置、绑定模型与搜索树。
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -10,8 +10,8 @@ use std::sync::{RwLock, Arc};
 
 use uuid::Uuid;
 
+use banqi_app::opponent::OpponentKind;
 use banqi_app::session::SnapshotSession;
-use banqi_app::view::{project, over_reason};
 use banqi_core::core::env::types::Player;
 use banqi_core::core::env::{PositionSnapshot, Variant};
 use banqi_engine::nnue::NnueEvaluator;
@@ -38,16 +38,19 @@ pub type Models = banqi_app::models::ModelPool;
 // 对局会话
 // ============================================================================
 
-/// AI 对手配置。
+/// 对手配置（PvP 时 `GameSession.opponent` 为 None）。
 #[derive(Clone, Copy, Debug)]
-pub struct AiConfig {
-    /// AI 执子方
+pub struct OpponentConfig {
+    /// 对手执子方
     pub player: Player,
-    /// 推理后端（由绑定模型文件扩展名决定；换绑模型时同步更新）
-    pub engine: EngineKind,
+    /// 对手种类（规则 / Engine / Nnue / MctsOnnx；模型类对手须绑定模型文件）
+    pub kind: OpponentKind,
     /// MCTS 模拟次数（MctsOnnx 后端；创建对局时快照固定，
     /// 未显式指定时取服务器当前默认值）
     pub mcts_sims: usize,
+    /// Expectimax 强引擎节点预算（Engine 对手；创建对局时快照固定，
+    /// 未显式指定时取服务器当前默认值）
+    pub engine_budget: u64,
     /// NNUE 搜索深度（Nnue 后端；创建对局时快照固定，
     /// 未显式指定时取服务器当前默认值）
     pub nnue_depth: i32,
@@ -56,23 +59,28 @@ pub struct AiConfig {
     pub nnue_budget: u64,
 }
 
-/// 单局状态：快照式会话核心 + AI 配置 + 绑定模型 + 搜索树。
+/// 单局状态：快照式会话核心 + 对手配置 + 绑定模型 + 搜索树。
 pub struct GameSession {
     /// 对局核心（变体/当前快照/悔棋历史/版本号；走子不变量在 banqi-app 单点维护）
     pub core: SnapshotSession,
-    pub ai: Option<AiConfig>,
-    /// 与对局绑定的模型文件（用户显式选择，建局必需）。
-    /// AI 回合与手动搜索均使用该文件（随用随加载，常驻缓存）。
+    /// 对手配置（None = 本地双人 PvP）
+    pub opponent: Option<OpponentConfig>,
+    /// 与对局绑定的模型文件（仅模型类对手需要；手动搜索亦使用该文件，
+    /// 随用随加载，常驻缓存）。
     pub model_file: Option<String>,
-    /// 最近一次 MCTS 搜索保留的树（AI 回合或手动搜索时替换；仅查询用）
+    /// 最近一次 MCTS 搜索保留的树（对手回合或手动搜索时替换；仅查询用）
     pub mcts_tree: Option<crate::mcts::MctsTreeBox>,
 }
 
 impl GameSession {
-    pub fn new(variant: Variant, ai: Option<AiConfig>, model_file: Option<String>) -> Self {
+    pub fn new(
+        variant: Variant,
+        opponent: Option<OpponentConfig>,
+        model_file: Option<String>,
+    ) -> Self {
         Self {
             core: SnapshotSession::new(variant),
-            ai,
+            opponent,
             model_file,
             mcts_tree: None,
         }
@@ -82,12 +90,12 @@ impl GameSession {
     pub fn from_snapshot(
         variant: Variant,
         snapshot: PositionSnapshot,
-        ai: Option<AiConfig>,
+        opponent: Option<OpponentConfig>,
         model_file: Option<String>,
     ) -> Self {
         Self {
             core: SnapshotSession::from_snapshot(variant, snapshot),
-            ai,
+            opponent,
             model_file,
             mcts_tree: None,
         }
@@ -135,12 +143,12 @@ impl GameSession {
         }
     }
 
-    /// 当前是否轮到 AI 行棋。
-    pub fn ai_to_move(&self) -> bool {
-        match self.ai {
-            Some(ai) => {
+    /// 当前是否轮到对手行棋（PvP 恒 false）。
+    pub fn opponent_to_move(&self) -> bool {
+        match self.opponent {
+            Some(opp) => {
                 let (terminated, truncated, _) = self.over_state();
-                !terminated && !truncated && self.core.current.current_player == ai.player
+                !terminated && !truncated && self.core.current.current_player == opp.player
             }
             None => false,
         }
@@ -152,85 +160,93 @@ impl GameSession {
         self.core.undoable()
     }
 
-    /// 当前完整状态视图（快照字段 + config 推导 + 泛型环境求合法动作）。
+    /// 当前完整状态视图：中立视图 `banqi_app::view::game_view`（单一真源）→ DTO 映射。
     pub fn view(&self, game_id: Uuid) -> GameStateResp {
-        let snap = &self.core.current;
-        let cfg = self.core.variant.config();
-        let (terminated, truncated, winner) = self.over_state();
+        let v = banqi_app::view::game_view(&self.core);
+        let s = &v.scalars;
+        let over = s.terminated || s.truncated;
 
-        // 棋盘视图（行优先；暗子不泄露真实身份）：结构化投影收敛在 banqi-app::view
-        let proj = project(snap);
-        let board: Vec<CellView> = proj
+        // 棋盘视图（行优先；暗子不泄露真实身份）
+        let board: Vec<CellView> = v
             .cells
             .iter()
-            .enumerate()
-            .map(|(index, cell)| {
+            .map(|c| {
                 use banqi_app::view::CellState::*;
-                let (state, piece) = match cell.state {
+                let (state, piece) = match c.state {
                     Empty => ("empty", None),
                     Hidden => ("hidden", None),
                     Revealed => (
                         "revealed",
-                        cell.piece.map(|p| PieceView {
+                        c.piece.map(|p| PieceView {
                             piece_type: piece_type_str(p.piece_type),
                             side: player_str(p.player),
                         }),
                     ),
                 };
                 CellView {
-                    index,
-                    row: index / cfg.cols,
-                    col: index % cfg.cols,
+                    index: c.index,
+                    row: c.row,
+                    col: c.col,
                     state: state.to_string(),
                     piece,
                 }
             })
             .collect();
 
-        // 合法动作视图（坐标经 action_lookup_tables 公开 API，与具体环境类型无关）
-        let legal_actions: Vec<ActionView> = self
-            .legal_actions()
-            .into_iter()
-            .map(|action| self.action_view(action))
+        // 合法动作视图
+        let legal_actions: Vec<ActionView> = v
+            .legal_actions
+            .iter()
+            .map(|a| ActionView {
+                action: a.action,
+                from: a.from,
+                to: a.to,
+                is_chance: a.is_chance,
+            })
             .collect();
 
         // 阵亡 / 隐藏棋子列表（按型展开；hidden 计数可由公开信息推导，不泄露暗子身份）
-        let dead_red: Vec<String> = proj.dead[0].iter().map(|t| piece_type_str(*t)).collect();
-        let dead_black: Vec<String> = proj.dead[1].iter().map(|t| piece_type_str(*t)).collect();
-        let hidden_red: Vec<String> = proj.hidden[0]
+        let dead_red: Vec<String> = v.dead[0].iter().map(|t| piece_type_str(*t)).collect();
+        let dead_black: Vec<String> = v.dead[1].iter().map(|t| piece_type_str(*t)).collect();
+        let hidden_red: Vec<String> = v.hidden[0]
             .iter()
             .map(|p| piece_type_str(p.piece_type))
             .collect();
-        let hidden_black: Vec<String> = proj.hidden[1]
+        let hidden_black: Vec<String> = v.hidden[1]
             .iter()
             .map(|p| piece_type_str(p.piece_type))
             .collect();
 
-        let over = terminated || truncated;
-        let over_reason =
-            over_reason(over, truncated, winner).map(|r| r.as_str().to_string());
-
-        let ai_view = match self.ai {
-            Some(ai) => AiInfoView {
+        let ai_view = match self.opponent {
+            Some(opp) => AiInfoView {
                 enabled: true,
-                player: Some(player_str(ai.player)),
-                engine: Some(ai.engine.as_str().to_string()),
-                mcts_sims: ai.mcts_sims,
-                nnue_depth: (ai.engine == EngineKind::Nnue).then_some(ai.nnue_depth),
-                nnue_budget: (ai.engine == EngineKind::Nnue).then_some(ai.nnue_budget),
+                kind: opp.kind.as_str().to_string(),
+                player: Some(player_str(opp.player)),
+                engine: match opp.kind {
+                    OpponentKind::Nnue => Some("nnue".to_string()),
+                    OpponentKind::MctsOnnx => Some("mcts-onnx".to_string()),
+                    _ => None,
+                },
+                mcts_sims: opp.mcts_sims,
+                engine_budget: (opp.kind == OpponentKind::Engine).then_some(opp.engine_budget),
+                nnue_depth: (opp.kind == OpponentKind::Nnue).then_some(opp.nnue_depth),
+                nnue_budget: (opp.kind == OpponentKind::Nnue).then_some(opp.nnue_budget),
             },
             None => AiInfoView {
                 enabled: false,
+                kind: "PvP".to_string(),
                 player: None,
                 engine: None,
                 mcts_sims: 0,
+                engine_budget: None,
                 nnue_depth: None,
                 nnue_budget: None,
             },
         };
 
-        // 决策历史（棋谱）：公共标量投影收敛在 banqi-app::common
-        let history: Vec<HistoryMoveView> = banqi_app::common::history_entries(&self.core.history)
+        // 决策历史（棋谱）
+        let history: Vec<HistoryMoveView> = v
+            .history
             .iter()
             .map(|e| HistoryMoveView {
                 ply: e.ply,
@@ -255,22 +271,22 @@ impl GameSession {
         GameStateResp {
             game_id: game_id.to_string(),
             variant: self.core.variant.as_str().to_string(),
-            fen: snap.to_fen(),
+            fen: s.fen.clone(),
             version: self.core.version,
-            current_player: player_str(snap.current_player),
-            move_count: snap.move_counter as usize,
-            total_steps: snap.total_step_counter as usize,
-            max_steps: cfg.max_steps_per_episode,
-            red_score: snap.scores[0],
-            black_score: snap.scores[1],
-            red_hp: snap.scores[0],
-            black_hp: snap.scores[1],
+            current_player: player_str(s.current_player),
+            move_count: s.move_count,
+            total_steps: s.total_steps,
+            max_steps: s.max_steps,
+            red_score: s.scores[0],
+            black_score: s.scores[1],
+            red_hp: s.scores[0],
+            black_hp: s.scores[1],
             over,
-            terminated,
-            truncated,
-            over_reason,
-            winner: winner_str(winner),
-            last_action: (snap.last_action >= 0).then_some(snap.last_action as usize),
+            terminated: s.terminated,
+            truncated: s.truncated,
+            over_reason: s.over_reason.map(|r| r.as_str().to_string()),
+            winner: winner_str(s.winner),
+            last_action: s.last_action,
             board,
             dead_red,
             dead_black,
@@ -279,7 +295,7 @@ impl GameSession {
             legal_actions,
             history,
             ai: ai_view,
-            ai_to_move: self.ai_to_move(),
+            ai_to_move: self.opponent_to_move(),
             undoable: self.undoable(),
         }
     }
@@ -312,6 +328,8 @@ pub struct AppState {
     /// 初始值取 `config.default_sims`，经 `PUT /api/settings` 在线修改。
     /// 仅作为创建对局时未显式指定 `mctsSims` 的取值；已建对局快照固定。
     pub default_sims: std::sync::atomic::AtomicUsize,
+    /// 运行时可调的 Expectimax 强引擎默认节点预算（同上：仅建局取值用）
+    pub default_engine_budget: std::sync::atomic::AtomicU64,
     /// 运行时可调的 NNUE 对手默认搜索深度（同上：仅建局取值用）
     pub default_nnue_depth: std::sync::atomic::AtomicI32,
     /// 运行时可调的 NNUE 对手默认节点预算（同上：仅建局取值用）
@@ -334,6 +352,9 @@ impl AppState {
         );
         Self {
             default_sims: std::sync::atomic::AtomicUsize::new(config.default_sims.max(1)),
+            default_engine_budget: std::sync::atomic::AtomicU64::new(
+                config.default_engine_budget.max(1),
+            ),
             default_nnue_depth: std::sync::atomic::AtomicI32::new(config.default_nnue_depth.max(1)),
             default_nnue_budget: std::sync::atomic::AtomicU64::new(config.default_nnue_budget.max(1)),
             config,
@@ -354,6 +375,21 @@ impl AppState {
     pub fn set_default_sims(&self, sims: usize) -> usize {
         let v = sims.max(1);
         self.default_sims.store(v, std::sync::atomic::Ordering::Relaxed);
+        v
+    }
+
+    /// 当前默认 Expectimax 强引擎节点预算（原子读取，钳制到至少 1）。
+    pub fn default_engine_budget(&self) -> u64 {
+        self.default_engine_budget
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .max(1)
+    }
+
+    /// 运行时调整默认强引擎节点预算，返回钳制后的生效值。
+    pub fn set_default_engine_budget(&self, budget: u64) -> u64 {
+        let v = budget.max(1);
+        self.default_engine_budget
+            .store(v, std::sync::atomic::Ordering::Relaxed);
         v
     }
 
