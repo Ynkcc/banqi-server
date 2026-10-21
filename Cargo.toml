@@ -8,6 +8,11 @@ description = "Banqi 暗棋对弈 HTTP 服务：axum REST API + ONNX 推理 + Gu
 name = "banqi-server"
 path = "src/main.rs"
 
+# 命令行客户端：REST API 的薄封装（LLM / 脚本测试用，替代 curl）
+[[bin]]
+name = "banqi-cli"
+path = "src/bin/cli.rs"
+
 [dependencies]
 banqi-core = { path = "../banqi-core" }
 banqi-engine = { path = "../banqi-engine" }
@@ -22,6 +27,10 @@ uuid = { version = "1", features = ["v4"] }
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# banqi-cli 专用（server 二进制不使用，链接时不引入）
+clap = { version = "4", default-features = false, features = ["std", "help", "usage", "error-context", "derive", "env"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "blocking"] }
 
 # 内嵌 Web 前端（banqi-frontend/dist）：debug 模式直接读文件系统（热改即生效），release 编译期打包进二进制
 rust-embed = "8"
