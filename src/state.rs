@@ -10,8 +10,10 @@ use std::sync::{RwLock, Arc};
 
 use uuid::Uuid;
 
-use banqi_app::opponent::OpponentKind;
+use banqi_app::opponent::{EngineParams, OpponentKind};
+use banqi_app::search::{BudgetMode, SearchBudget};
 use banqi_app::session::SnapshotSession;
+use banqi_app::sync::{read_lock, write_lock};
 use banqi_core::core::env::types::Player;
 use banqi_core::core::env::{PositionSnapshot, Variant};
 use banqi_engine::nnue::NnueEvaluator;
@@ -51,12 +53,10 @@ pub struct OpponentConfig {
     /// Expectimax 强引擎节点预算（Engine 对手；创建对局时快照固定，
     /// 未显式指定时取服务器当前默认值）
     pub engine_budget: u64,
-    /// NNUE 搜索深度（Nnue 后端；创建对局时快照固定，
-    /// 未显式指定时取服务器当前默认值）
-    pub nnue_depth: i32,
-    /// NNUE 节点预算（Nnue 后端；创建对局时快照固定，
-    /// 未显式指定时取服务器当前默认值）
-    pub nnue_budget: u64,
+    /// Expectimax 搜索预算（Engine：节点预算 + 硬超时；Nnue：模式 +
+    /// 节点/深度/时间 + 硬超时。创建对局时快照固定，未显式指定字段
+    /// 取服务器当前默认值）
+    pub search_budget: SearchBudget,
 }
 
 /// 单局状态：快照式会话核心 + 对手配置 + 绑定模型 + 搜索树。
@@ -127,7 +127,8 @@ impl GameSession {
         self.core.undo_to_current_player().map_err(ApiError::from)
     }
 
-    /// 当前合法动作列表。
+    /// 当前合法动作列表（状态视图经 `game_view` 产出；此方法供测试与扩展使用）。
+    #[allow(dead_code)]
     pub fn legal_actions(&self) -> Vec<usize> {
         self.core.legal_actions()
     }
@@ -229,8 +230,19 @@ impl GameSession {
                 },
                 mcts_sims: opp.mcts_sims,
                 engine_budget: (opp.kind == OpponentKind::Engine).then_some(opp.engine_budget),
-                nnue_depth: (opp.kind == OpponentKind::Nnue).then_some(opp.nnue_depth),
-                nnue_budget: (opp.kind == OpponentKind::Nnue).then_some(opp.nnue_budget),
+                budget_mode: (opp.kind == OpponentKind::Nnue)
+                    .then(|| opp.search_budget.mode.as_str().to_string()),
+                nnue_depth: (opp.kind == OpponentKind::Nnue
+                    && opp.search_budget.mode == BudgetMode::DepthNodes)
+                    .then_some(opp.search_budget.depth),
+                nnue_budget: (opp.kind == OpponentKind::Nnue
+                    && opp.search_budget.mode != BudgetMode::Time)
+                    .then_some(opp.search_budget.nodes),
+                nnue_time_ms: (opp.kind == OpponentKind::Nnue
+                    && opp.search_budget.mode == BudgetMode::Time)
+                    .then_some(opp.search_budget.time_ms),
+                search_timeout_ms: (opp.kind == OpponentKind::Nnue)
+                    .then_some(opp.search_budget.timeout_ms),
             },
             None => AiInfoView {
                 enabled: false,
@@ -239,8 +251,11 @@ impl GameSession {
                 engine: None,
                 mcts_sims: 0,
                 engine_budget: None,
+                budget_mode: None,
                 nnue_depth: None,
                 nnue_budget: None,
+                nnue_time_ms: None,
+                search_timeout_ms: None,
             },
         };
 
@@ -324,16 +339,11 @@ impl GameSession {
 /// axum 共享状态。
 pub struct AppState {
     pub config: ServerConfig,
-    /// 运行时可调的默认 MCTS 搜索预算（模拟次数）；
-    /// 初始值取 `config.default_sims`，经 `PUT /api/settings` 在线修改。
-    /// 仅作为创建对局时未显式指定 `mctsSims` 的取值；已建对局快照固定。
-    pub default_sims: std::sync::atomic::AtomicUsize,
-    /// 运行时可调的 Expectimax 强引擎默认节点预算（同上：仅建局取值用）
-    pub default_engine_budget: std::sync::atomic::AtomicU64,
-    /// 运行时可调的 NNUE 对手默认搜索深度（同上：仅建局取值用）
-    pub default_nnue_depth: std::sync::atomic::AtomicI32,
-    /// 运行时可调的 NNUE 对手默认节点预算（同上：仅建局取值用）
-    pub default_nnue_budget: std::sync::atomic::AtomicU64,
+    /// 运行时可调的默认引擎参数快照（MCTS 模拟次数 / 强引擎节点预算 /
+    /// NNUE 搜索预算，含模式与硬超时）；初始值取 `config`，经
+    /// `PUT /api/settings` 在线修改。仅作为创建对局时未显式指定字段的
+    /// 取值；已建对局的参数在建局时快照固定。
+    pub params: RwLock<EngineParams>,
     pub models: Models,
     /// 对局存储（std RwLock 即可：所有持锁段均为同步 CPU 操作，不跨 await）
     pub games: RwLock<HashMap<Uuid, GameSession>>,
@@ -350,77 +360,78 @@ impl AppState {
             &config.device,
             config.nn_cache_entries,
         );
+        let params = EngineParams {
+            mcts_sims: config.default_sims.max(1),
+            engine_budget: config.default_engine_budget.max(1),
+            nnue_budget: config.default_nnue.clamped(),
+        };
         Self {
-            default_sims: std::sync::atomic::AtomicUsize::new(config.default_sims.max(1)),
-            default_engine_budget: std::sync::atomic::AtomicU64::new(
-                config.default_engine_budget.max(1),
-            ),
-            default_nnue_depth: std::sync::atomic::AtomicI32::new(config.default_nnue_depth.max(1)),
-            default_nnue_budget: std::sync::atomic::AtomicU64::new(config.default_nnue_budget.max(1)),
+            params: RwLock::new(params),
             config,
             models,
             games: RwLock::new(HashMap::new()),
         }
     }
 
-    /// 当前默认 MCTS 搜索预算（原子读取，钳制到至少 1）。
+    /// 当前默认引擎参数快照（读锁内拷贝，钳制规则由 `EngineParams` 维护）。
+    pub fn params(&self) -> EngineParams {
+        *read_lock(&self.params)
+    }
+
+    /// 当前默认 MCTS 搜索预算。
     pub fn default_sims(&self) -> usize {
-        self.default_sims
-            .load(std::sync::atomic::Ordering::Relaxed)
-            .max(1)
+        self.params().mcts_sims
     }
 
-    /// 运行时调整默认 MCTS 搜索预算，返回钳制后的生效值。
-    /// 只影响之后创建的对局（已建对局的模拟次数在建局时快照固定）。
-    pub fn set_default_sims(&self, sims: usize) -> usize {
-        let v = sims.max(1);
-        self.default_sims.store(v, std::sync::atomic::Ordering::Relaxed);
-        v
-    }
-
-    /// 当前默认 Expectimax 强引擎节点预算（原子读取，钳制到至少 1）。
+    /// 当前默认 Expectimax 强引擎节点预算。
     pub fn default_engine_budget(&self) -> u64 {
-        self.default_engine_budget
-            .load(std::sync::atomic::Ordering::Relaxed)
-            .max(1)
+        self.params().engine_budget
     }
 
-    /// 运行时调整默认强引擎节点预算，返回钳制后的生效值。
-    pub fn set_default_engine_budget(&self, budget: u64) -> u64 {
-        let v = budget.max(1);
-        self.default_engine_budget
-            .store(v, std::sync::atomic::Ordering::Relaxed);
-        v
+    /// 当前默认 NNUE 搜索预算（含模式与硬超时）。
+    pub fn default_nnue_budget(&self) -> SearchBudget {
+        self.params().nnue_budget
     }
 
-    /// 当前默认 NNUE 搜索深度（原子读取，钳制到至少 1）。
-    pub fn default_nnue_depth(&self) -> i32 {
-        self.default_nnue_depth
-            .load(std::sync::atomic::Ordering::Relaxed)
-            .max(1)
+    /// 由请求字段 + 服务器默认值构建搜索预算：未显式指定的字段取当前默认值，
+    /// 模式字符串非法时报 400（建局 / 引擎查询 / settings 共用）。
+    pub fn build_search_budget(
+        &self,
+        mode: Option<&str>,
+        nodes: Option<u64>,
+        depth: Option<i32>,
+        time_ms: Option<u64>,
+        timeout_ms: Option<u64>,
+    ) -> Result<SearchBudget, ApiError> {
+        let defaults = self.default_nnue_budget();
+        let mode = match mode {
+            None => defaults.mode,
+            Some(s) => BudgetMode::parse(s).ok_or_else(|| {
+                ApiError::BadRequest(format!(
+                    "非法预算模式: {s}（可选 nodes / depth_nodes / time）"
+                ))
+            })?,
+        };
+        Ok(SearchBudget {
+            mode,
+            nodes: nodes.unwrap_or(defaults.nodes).max(1),
+            depth: depth.unwrap_or(defaults.depth).max(1),
+            time_ms: time_ms.unwrap_or(defaults.time_ms),
+            timeout_ms: timeout_ms.unwrap_or(defaults.timeout_ms).max(1),
+        })
     }
 
-    /// 运行时调整默认 NNUE 搜索深度，返回钳制后的生效值。
-    pub fn set_default_nnue_depth(&self, depth: i32) -> i32 {
-        let v = depth.max(1);
-        self.default_nnue_depth
-            .store(v, std::sync::atomic::Ordering::Relaxed);
-        v
-    }
-
-    /// 当前默认 NNUE 节点预算（原子读取，钳制到至少 1）。
-    pub fn default_nnue_budget(&self) -> u64 {
-        self.default_nnue_budget
-            .load(std::sync::atomic::Ordering::Relaxed)
-            .max(1)
-    }
-
-    /// 运行时调整默认 NNUE 节点预算，返回钳制后的生效值。
-    pub fn set_default_nnue_budget(&self, budget: u64) -> u64 {
-        let v = budget.max(1);
-        self.default_nnue_budget
-            .store(v, std::sync::atomic::Ordering::Relaxed);
-        v
+    /// 运行时部分更新默认引擎参数：只覆盖 `Some` 字段，返回钳制后的生效快照。
+    /// 只影响之后创建的对局（已建对局的参数在建局时快照固定）。
+    pub fn update_params(
+        &self,
+        mcts_sims: Option<usize>,
+        engine_budget: Option<u64>,
+        nnue_budget: Option<SearchBudget>,
+    ) -> EngineParams {
+        let mut p = write_lock(&self.params);
+        *p = p.updated(mcts_sims, engine_budget, nnue_budget);
+        *p
     }
 
     /// 创建对局的默认变体：--default-variant > 首个变体。
@@ -516,10 +527,15 @@ mod tests {
     #[test]
     fn set_default_sims_clamps_to_at_least_one() {
         let app = test_app();
-        assert_eq!(app.set_default_sims(0), 1);
+        let p = app.update_params(Some(0), None, None);
+        assert_eq!(p.mcts_sims, 1);
         assert_eq!(app.default_sims(), 1);
         // 默认变体不依赖模型扫描
         assert_eq!(app.default_variant(), Variant::ALL[0]);
+        // NNUE 默认预算：模式 + 硬超时均取默认值（DepthNodes / 60s）
+        let b = app.default_nnue_budget();
+        assert_eq!(b.mode, banqi_app::search::BudgetMode::DepthNodes);
+        assert_eq!(b.timeout_ms, 60_000);
     }
 
     #[test]

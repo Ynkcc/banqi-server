@@ -11,6 +11,7 @@ use axum::{Json, Router};
 use banqi_core::core::env::Variant;
 
 use crate::dto::{HealthResp, ModelInfo, SettingsReq, SettingsResp, VariantInfo, VariantsResp};
+use crate::error::ApiError;
 use crate::state::SharedState;
 use crate::web;
 
@@ -76,45 +77,51 @@ async fn variants() -> Json<VariantsResp> {
 }
 
 /// GET /api/settings：读取运行时可调的服务端设置（默认 MCTS 搜索预算 /
-/// 强引擎节点预算 / NNUE 深度与预算）。
+/// 强引擎节点预算 / NNUE 搜索预算：模式 + 节点/深度/时间 + 硬超时）。
 async fn get_settings(State(app): State<SharedState>) -> Json<SettingsResp> {
+    let p = app.params();
     Json(SettingsResp {
-        mcts_sims: app.default_sims(),
-        engine_budget: app.default_engine_budget(),
-        nnue_depth: app.default_nnue_depth(),
-        nnue_budget: app.default_nnue_budget(),
+        mcts_sims: p.mcts_sims,
+        engine_budget: p.engine_budget,
+        nnue_budget_mode: p.nnue_budget.mode.as_str().to_string(),
+        nnue_depth: p.nnue_budget.depth,
+        nnue_budget: p.nnue_budget.nodes,
+        nnue_time_ms: p.nnue_budget.time_ms,
+        search_timeout_ms: p.nnue_budget.timeout_ms,
     })
 }
 
 /// PUT /api/settings：运行时调整默认引擎参数（进行中的「跟随默认」对局实时同步；
-/// 显式指定参数的对局不受影响）。缺省字段不修改。
+/// 显式指定参数的对局不受影响）。缺省字段不修改；只覆盖显式给出的字段。
 async fn put_settings(
     State(app): State<SharedState>,
     Json(req): Json<SettingsReq>,
-) -> Json<SettingsResp> {
-    let mcts_sims = match req.mcts_sims {
-        Some(v) => app.set_default_sims(v),
-        None => app.default_sims(),
-    };
-    let engine_budget = match req.engine_budget {
-        Some(v) => app.set_default_engine_budget(v),
-        None => app.default_engine_budget(),
-    };
-    let nnue_depth = match req.nnue_depth {
-        Some(v) => app.set_default_nnue_depth(v),
-        None => app.default_nnue_depth(),
-    };
-    let nnue_budget = match req.nnue_budget {
-        Some(v) => app.set_default_nnue_budget(v),
-        None => app.default_nnue_budget(),
-    };
+) -> Result<Json<SettingsResp>, ApiError> {
+    let nnue_budget = app.build_search_budget(
+        req.nnue_budget_mode.as_deref(),
+        req.nnue_budget,
+        req.nnue_depth,
+        req.nnue_time_ms,
+        req.search_timeout_ms,
+    )?;
+    let p = app.update_params(req.mcts_sims, req.engine_budget, Some(nnue_budget));
     tracing::info!(
-        "运行时调整默认引擎参数: mcts_sims={mcts_sims}, engine_budget={engine_budget}, nnue_depth={nnue_depth}, nnue_budget={nnue_budget}"
+        "运行时调整默认引擎参数: mcts_sims={}, engine_budget={}, nnue_mode={}, nnue_depth={}, nnue_budget={}, nnue_time_ms={}, search_timeout_ms={}",
+        p.mcts_sims,
+        p.engine_budget,
+        p.nnue_budget.mode.as_str(),
+        p.nnue_budget.depth,
+        p.nnue_budget.nodes,
+        p.nnue_budget.time_ms,
+        p.nnue_budget.timeout_ms
     );
-    Json(SettingsResp {
-        mcts_sims,
-        engine_budget,
-        nnue_depth,
-        nnue_budget,
-    })
+    Ok(Json(SettingsResp {
+        mcts_sims: p.mcts_sims,
+        engine_budget: p.engine_budget,
+        nnue_budget_mode: p.nnue_budget.mode.as_str().to_string(),
+        nnue_depth: p.nnue_budget.depth,
+        nnue_budget: p.nnue_budget.nodes,
+        nnue_time_ms: p.nnue_budget.time_ms,
+        search_timeout_ms: p.nnue_budget.timeout_ms,
+    }))
 }

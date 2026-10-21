@@ -86,8 +86,13 @@ async fn build_opponent(
                 .engine_budget
                 .unwrap_or_else(|| app.default_engine_budget())
                 .max(1),
-            nnue_depth: req.nnue_depth.unwrap_or_else(|| app.default_nnue_depth()).max(1),
-            nnue_budget: req.nnue_budget.unwrap_or_else(|| app.default_nnue_budget()).max(1),
+            search_budget: app.build_search_budget(
+                req.nnue_budget_mode.as_deref(),
+                req.nnue_budget,
+                req.nnue_depth,
+                req.nnue_time_ms,
+                req.search_timeout_ms,
+            )?,
         },
         model_file,
     ))

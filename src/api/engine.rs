@@ -49,16 +49,18 @@ pub async fn engine_move(
 
     let (action, mcts_stats, nnue_stats) = match engine {
         EngineKind::Nnue => {
-            let depth = req.nnue_depth.unwrap_or_else(|| app.default_nnue_depth()).max(1);
-            let budget = req
-                .nnue_budget
-                .unwrap_or_else(|| app.default_nnue_budget())
-                .max(1);
+            let budget = app.build_search_budget(
+                req.nnue_budget_mode.as_deref(),
+                req.nnue_budget,
+                req.nnue_depth,
+                req.nnue_time_ms,
+                req.search_timeout_ms,
+            )?;
             let evaluator = app
                 .acquire_nnue_model(model_file)
                 .await
                 .map_err(ApiError::ModelUnavailable)?;
-            let (action, stats) = crate::ai::choose_nnue_blocking(snap, evaluator, depth, budget)
+            let (action, stats) = crate::ai::choose_nnue_blocking(snap, evaluator, budget)
                 .await
                 .map_err(ApiError::Internal)?;
             (action, None, Some(stats))

@@ -1,7 +1,8 @@
-//! 服务器配置：CLI 参数优先，环境变量兜底，最后取默认值。
+//! 服务器配置：CLI 参数优先，最后取默认值（不读环境变量，全部经 CLI 显式传递）。
 
 use std::path::PathBuf;
 
+use banqi_app::search::SearchBudget;
 use banqi_core::core::env::Variant;
 
 #[derive(Debug, Clone)]
@@ -23,10 +24,8 @@ pub struct ServerConfig {
     pub nn_cache_entries: usize,
     /// Expectimax 强引擎默认节点预算（创建对局未指定时使用）
     pub default_engine_budget: u64,
-    /// NNUE 对手默认搜索深度（迭代加深上限；创建对局未指定时使用）
-    pub default_nnue_depth: i32,
-    /// NNUE 对手默认节点预算（创建对局未指定时使用）
-    pub default_nnue_budget: u64,
+    /// NNUE 对手默认搜索预算（模式 + 节点/深度/时间 + 硬超时；创建对局未指定时使用）
+    pub default_nnue: SearchBudget,
 }
 
 impl Default for ServerConfig {
@@ -40,62 +39,18 @@ impl Default for ServerConfig {
             default_variant: None,
             nn_cache_entries: 200_000,
             default_engine_budget: 300_000,
-            default_nnue_depth: 8,
-            default_nnue_budget: 200_000,
+            default_nnue: SearchBudget::default(),
         }
     }
 }
 
 impl ServerConfig {
-    /// 解析配置：CLI 参数 > 环境变量 > 默认值。
+    /// 解析配置：CLI 参数 > 默认值（不读环境变量，全部经 CLI 显式传递）。
     pub fn from_env_and_args() -> Result<Self, String> {
-        let mut cfg = Self::from_env();
+        let mut cfg = Self::default();
         cfg.apply_args(std::env::args().skip(1))?;
         cfg.validate()?;
         Ok(cfg)
-    }
-
-    /// 环境变量兜底：BANQI_ADDR / BANQI_MODELS_DIR / BANQI_SESSIONS / BANQI_DEVICE / BANQI_DEFAULT_VARIANT
-    fn from_env() -> Self {
-        let mut cfg = Self::default();
-        if let Ok(v) = std::env::var("BANQI_ADDR") {
-            cfg.addr = v;
-        }
-        if let Ok(v) = std::env::var("BANQI_MODELS_DIR") {
-            cfg.models_dir = PathBuf::from(v);
-        }
-        if let Ok(v) = std::env::var("BANQI_SESSIONS") {
-            if let Ok(n) = v.parse() {
-                cfg.sessions = n;
-            }
-        }
-        if let Ok(v) = std::env::var("BANQI_DEVICE") {
-            cfg.device = v;
-        }
-        if let Ok(v) = std::env::var("BANQI_DEFAULT_VARIANT") {
-            cfg.default_variant = parse_variant(&v);
-        }
-        if let Ok(v) = std::env::var("BANQI_NN_CACHE") {
-            if let Ok(n) = v.parse() {
-                cfg.nn_cache_entries = n;
-            }
-        }
-        if let Ok(v) = std::env::var("BANQI_ENGINE_BUDGET") {
-            if let Ok(n) = v.parse() {
-                cfg.default_engine_budget = n;
-            }
-        }
-        if let Ok(v) = std::env::var("BANQI_NNUE_DEPTH") {
-            if let Ok(n) = v.parse() {
-                cfg.default_nnue_depth = n;
-            }
-        }
-        if let Ok(v) = std::env::var("BANQI_NNUE_BUDGET") {
-            if let Ok(n) = v.parse() {
-                cfg.default_nnue_budget = n;
-            }
-        }
-        cfg
     }
 
     /// CLI 参数：--addr / --models-dir / --sessions / --device
@@ -104,6 +59,10 @@ impl ServerConfig {
         let args: Vec<String> = args.collect();
         let mut i = 0;
         while i < args.len() {
+            // 无值选项：--help / -h（在取值前处理，避免「缺少值」误报）
+            if args[i] == "--help" || args[i] == "-h" {
+                return Err(Self::usage());
+            }
             let (key, value) = match (args[i].as_str(), args.get(i + 1)) {
                 // --key=value 形式
                 (k, _) if k.starts_with("--") && k.contains('=') => {
@@ -129,15 +88,31 @@ impl ServerConfig {
                         .parse()
                         .map_err(|_| format!("--nn-cache 需要非负整数（0 = 关闭），得到: {value}"))?
                 }
+                "--nnue-mode" => {
+                    self.default_nnue.mode = banqi_app::search::BudgetMode::parse(&value)
+                        .ok_or_else(|| {
+                            format!("--nnue-mode 未知模式: {value}（可选 nodes / depth_nodes / time）")
+                        })?
+                }
                 "--nnue-depth" => {
-                    self.default_nnue_depth = value
+                    self.default_nnue.depth = value
                         .parse()
                         .map_err(|_| format!("--nnue-depth 需要正整数，得到: {value}"))?
                 }
                 "--nnue-budget" => {
-                    self.default_nnue_budget = value
+                    self.default_nnue.nodes = value
                         .parse()
-                        .map_err(|_| format!("--nnue-budget 需要非负整数，得到: {value}"))?
+                        .map_err(|_| format!("--nnue-budget 需要正整数，得到: {value}"))?
+                }
+                "--nnue-time" => {
+                    self.default_nnue.time_ms = value
+                        .parse()
+                        .map_err(|_| format!("--nnue-time 需要非负整数（毫秒），得到: {value}"))?
+                }
+                "--search-timeout" => {
+                    self.default_nnue.timeout_ms = value
+                        .parse()
+                        .map_err(|_| format!("--search-timeout 需要正整数（毫秒），得到: {value}"))?
                 }
                 "--default-variant" => {
                     self.default_variant = Some(parse_variant(&value).ok_or_else(|| {
@@ -146,9 +121,6 @@ impl ServerConfig {
                             Variant::ALL.iter().map(|v| v.as_str()).collect::<Vec<_>>().join(", ")
                         )
                     })?)
-                }
-                "--help" | "-h" => {
-                    return Err(Self::usage());
                 }
                 other => return Err(format!("未知参数: {other}")),
             }
@@ -164,32 +136,40 @@ impl ServerConfig {
         if self.default_sims == 0 {
             return Err("default_sims 必须至少为 1".to_string());
         }
-        if self.default_nnue_depth <= 0 {
-            return Err("default_nnue_depth 必须至少为 1".to_string());
-        }
-        if self.default_nnue_budget == 0 {
-            return Err("default_nnue_budget 必须至少为 1".to_string());
-        }
         if self.default_engine_budget == 0 {
             return Err("default_engine_budget 必须至少为 1".to_string());
+        }
+        if self.default_nnue.nodes == 0 {
+            return Err("default_nnue.nodes 必须至少为 1".to_string());
+        }
+        if self.default_nnue.depth <= 0 {
+            return Err("default_nnue.depth 必须至少为 1".to_string());
+        }
+        if self.default_nnue.timeout_ms == 0 {
+            return Err("default_nnue.timeout_ms 必须至少为 1".to_string());
         }
         Ok(())
     }
 
     fn usage() -> String {
         "banqi-server — Banqi 暗棋对弈 HTTP 服务\n\
-         \x20 用法: banqi-server [选项]\n\
-         \x20   --addr <ADDR>               监听地址（默认 127.0.0.1:8080，env BANQI_ADDR）\n\
-         \x20   --models-dir <DIR>          ONNX 模型目录（默认 models，env BANQI_MODELS_DIR）\n\
-         \x20   --sessions <N>              ONNX 会话池大小（默认 1，env BANQI_SESSIONS）\n\
-         \x20   --device <DEV>              cpu|cuda|auto（默认 cpu，env BANQI_DEVICE）\n\
-         \x20   --nn-cache <N>              NN 推理缓存条目上限（默认 200000，0 = 关闭，\n\
-         \x20                               env BANQI_NN_CACHE；每条 ≈ 1.5-2KB）\n\
-         \x20   --engine-budget <N>         强引擎默认节点预算（默认 300000，env BANQI_ENGINE_BUDGET）\n\
-         \x20   --nnue-depth <N>            NNUE 对手默认搜索深度（默认 8，env BANQI_NNUE_DEPTH）\n\
-         \x20   --nnue-budget <N>           NNUE 对手默认节点预算（默认 200000，env BANQI_NNUE_BUDGET）\n\
-         \x20   --default-variant <ID>      默认对局变体（env BANQI_DEFAULT_VARIANT；\n\
-         \x20                               缺省时取首个有模型者，再退回首个变体）"
+         \x20 用法: banqi-server [选项]（配置仅经 CLI 参数传递，不读环境变量）\n\
+         \x20   --addr <ADDR>               监听地址（默认 127.0.0.1:8080）\n\
+         \x20   --models-dir <DIR>          ONNX 模型目录（默认 models）\n\
+         \x20   --sessions <N>              ONNX 会话池大小（默认 1）\n\
+         \x20   --device <DEV>              cpu|cuda|auto（默认 cpu）\n\
+         \x20   --nn-cache <N>              NN 推理缓存条目上限（默认 200000，0 = 关闭；\n\
+         \x20                               每条 ≈ 1.5-2KB）\n\
+         \x20   --engine-budget <N>         强引擎默认节点预算（默认 300000）\n\
+         \x20   --nnue-mode <MODE>          NNUE 对手默认预算模式 nodes|depth_nodes|time\n\
+         \x20                               （默认 depth_nodes）\n\
+         \x20   --nnue-depth <N>            NNUE 对手默认深度上限（depth_nodes 模式，默认 8）\n\
+         \x20   --nnue-budget <N>           NNUE 对手默认节点预算（nodes/depth_nodes 模式，默认 200000）\n\
+         \x20   --nnue-time <MS>            NNUE 对手默认时间预算（time 模式，默认 5000 毫秒）\n\
+         \x20   --search-timeout <MS>       搜索硬超时（全模式必选生效，默认 60000 毫秒；\n\
+         \x20                               超时放弃后续搜索返回实际结果）\n\
+         \x20   --default-variant <ID>      默认对局变体（缺省时取首个有模型者，\n\
+         \x20                               再退回首个变体）"
             .to_string()
     }
 }

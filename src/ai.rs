@@ -18,6 +18,7 @@ use uuid::Uuid;
 #[cfg(feature = "onnx")]
 use banqi_app::with_env;
 use banqi_app::opponent::{OpponentKind, SimpleKind};
+use banqi_app::search::{BudgetMode, SearchBudget};
 use banqi_app::sync::{read_lock, write_lock};
 use banqi_core::core::env::DarkChessEnv;
 #[cfg(feature = "onnx")]
@@ -75,15 +76,14 @@ pub(crate) async fn choose_blocking(
 pub(crate) async fn choose_nnue_blocking(
     snap: PositionSnapshot,
     evaluator: Arc<NnueEvaluator>,
-    depth: i32,
-    budget: u64,
+    budget: SearchBudget,
 ) -> Result<(usize, NnueStatsDto), String> {
     let joined = tokio::task::spawn_blocking(move || {
         use banqi_core::core::env::SnapshotEnv;
 
         let env = DarkChessEnv::from_snapshot(&snap)
             .map_err(|e| format!("重建环境失败: {e}"))?;
-        banqi_app::search::nnue_search(&env, evaluator, depth, budget)
+        banqi_app::search::nnue_search(&env, evaluator, budget)
     })
     .await
     .map_err(|e| format!("blocking 任务 join 失败: {e}"))?;
@@ -92,8 +92,10 @@ pub(crate) async fn choose_nnue_blocking(
         action,
         NnueStatsDto {
             engine: "nnue".to_string(),
+            mode: stats.mode.to_string(),
             depth: stats.depth,
             budget: stats.budget,
+            time_limit_ms: stats.time_limit_ms,
             nodes: stats.nodes,
             reached_depth: stats.reached_depth,
             elapsed_ms: stats.elapsed_ms,
@@ -110,8 +112,8 @@ struct TurnPlan {
     model_file: Option<String>,
     mcts_sims: usize,
     engine_budget: u64,
-    nnue_depth: i32,
-    nnue_budget: u64,
+    /// Expectimax 搜索预算（Nnue 全量；Engine 取节点预算 + 硬超时）
+    search_budget: SearchBudget,
     /// 规则对手：锁内已完成的同步决策结果（其余对手为 None）
     ready_action: Option<usize>,
 }
@@ -150,15 +152,14 @@ fn plan_opponent_turn(
         model_file: s.model_file.clone(),
         mcts_sims: opp.mcts_sims,
         engine_budget: opp.engine_budget,
-        nnue_depth: opp.nnue_depth,
-        nnue_budget: opp.nnue_budget,
+        search_budget: opp.search_budget,
         ready_action: None,
     };
     if let OpponentKind::Rule(rule) = opp.kind {
         let action = banqi_app::opponent::choose_simple(
             SimpleKind::Rule(rule),
             &s.core.current,
-            opp.engine_budget,
+            &opp.search_budget,
         )
         .map_err(ApiError::Internal)?;
         return Ok(TurnPlan {
@@ -240,9 +241,15 @@ pub async fn run_opponent_turn(
         OpponentKind::Rule(_) => return Ok(None),
         OpponentKind::Engine => {
             let snap = plan.snap;
-            let budget = plan.engine_budget;
+            // Engine 对手：节点预算 + 硬超时（节点模式）
+            let budget = SearchBudget {
+                mode: BudgetMode::Nodes,
+                nodes: plan.engine_budget,
+                timeout_ms: plan.search_budget.timeout_ms,
+                ..Default::default()
+            };
             let action = tokio::task::spawn_blocking(move || {
-                banqi_app::opponent::choose_simple(SimpleKind::Engine, &snap, budget)
+                banqi_app::opponent::choose_simple(SimpleKind::Engine, &snap, &budget)
             })
             .await
             .map_err(|e| ApiError::Internal(format!("blocking 任务 join 失败: {e}")))?
@@ -259,7 +266,7 @@ pub async fn run_opponent_turn(
                 .await
                 .map_err(ApiError::ModelUnavailable)?;
             let (action, stats) =
-                choose_nnue_blocking(plan.snap, evaluator, plan.nnue_depth, plan.nnue_budget)
+                choose_nnue_blocking(plan.snap, evaluator, plan.search_budget)
                     .await
                     .map_err(ApiError::Internal)?;
             (action, None, Some(stats))

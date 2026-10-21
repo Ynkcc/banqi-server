@@ -32,6 +32,17 @@ pub struct CreateGameReq {
     /// Expectimax 强引擎节点预算（仅 Engine 对手生效）；缺省时取服务器当前默认值。
     #[serde(default)]
     pub engine_budget: Option<u64>,
+    /// NNUE 对手预算模式："nodes"（纯节点预算）/ "depth_nodes"（深度+节点预算，
+    /// 默认）/ "time"（用时）。缺省时取服务器当前默认模式。
+    #[serde(default)]
+    pub nnue_budget_mode: Option<String>,
+    /// NNUE 时间预算毫秒（仅 "time" 模式生效）；缺省时取服务器当前默认值。
+    #[serde(default)]
+    pub nnue_time_ms: Option<u64>,
+    /// 搜索硬超时毫秒（全模式必选生效；超时放弃后续搜索返回实际结果）。
+    /// 缺省时取服务器当前默认值（60s）。
+    #[serde(default)]
+    pub search_timeout_ms: Option<u64>,
     /// 显式绑定的模型文件（用户从 /api/health 模型清单中选择；须在模型目录内）。
     /// 仅模型类对手（Nnue / MctsOnnx）需要；缺省自动匹配；同变体存在多个候选
     /// 模型时自动匹配报歧义错误，必须显式指定。
@@ -67,12 +78,21 @@ pub struct SettingsReq {
     /// 默认 Expectimax 强引擎节点预算（运行时生效；至少 1）。缺省不修改。
     #[serde(default)]
     pub engine_budget: Option<u64>,
-    /// 默认 NNUE 搜索深度（运行时生效；至少 1）。缺省不修改。
+    /// 默认 NNUE 预算模式："nodes" / "depth_nodes" / "time"。缺省不修改。
+    #[serde(default)]
+    pub nnue_budget_mode: Option<String>,
+    /// 默认 NNUE 搜索深度（depth_nodes 模式；至少 1）。缺省不修改。
     #[serde(default)]
     pub nnue_depth: Option<i32>,
-    /// 默认 NNUE 节点预算（运行时生效；至少 1）。缺省不修改。
+    /// 默认 NNUE 节点预算（nodes/depth_nodes 模式；至少 1）。缺省不修改。
     #[serde(default)]
     pub nnue_budget: Option<u64>,
+    /// 默认 NNUE 时间预算毫秒（time 模式；0 = 仅超时控制）。缺省不修改。
+    #[serde(default)]
+    pub nnue_time_ms: Option<u64>,
+    /// 默认搜索硬超时毫秒（全模式必选生效；至少 1）。缺省不修改。
+    #[serde(default)]
+    pub search_timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -101,12 +121,21 @@ pub struct EngineMoveReq {
     /// MCTS 模拟次数；缺省时取服务器当前默认值
     #[serde(default)]
     pub mcts_sims: Option<usize>,
-    /// NNUE 搜索深度（仅 `.nnue` 模型生效）；缺省时取服务器当前默认值
+    /// NNUE 预算模式："nodes" / "depth_nodes"（默认）/ "time"；缺省取服务器当前默认值
+    #[serde(default)]
+    pub nnue_budget_mode: Option<String>,
+    /// NNUE 搜索深度（仅 `.nnue` 模型，depth_nodes 模式生效）；缺省时取服务器当前默认值
     #[serde(default)]
     pub nnue_depth: Option<i32>,
-    /// NNUE 节点预算（仅 `.nnue` 模型生效）；缺省时取服务器当前默认值
+    /// NNUE 节点预算（仅 `.nnue` 模型，nodes/depth_nodes 模式生效）；缺省时取服务器当前默认值
     #[serde(default)]
     pub nnue_budget: Option<u64>,
+    /// NNUE 时间预算毫秒（仅 `.nnue` 模型，time 模式生效）；缺省时取服务器当前默认值
+    #[serde(default)]
+    pub nnue_time_ms: Option<u64>,
+    /// 搜索硬超时毫秒（全模式必选生效）；缺省时取服务器当前默认值（60s）
+    #[serde(default)]
+    pub search_timeout_ms: Option<u64>,
     /// 模型文件（须在模型目录内，`.onnx` / `.nnue` 均可；推理后端由扩展名决定）。
     /// 缺省时按变体 ID 自动匹配唯一文件名候选（如 `dark_chess_4x8.onnx`）；
     /// 无法唯一确定时报错。
@@ -175,12 +204,21 @@ pub struct AiInfoView {
     /// Expectimax 强引擎节点预算（Engine 对手）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub engine_budget: Option<u64>,
-    /// NNUE 搜索深度（Nnue 后端）
+    /// NNUE 预算模式："nodes" / "depth_nodes" / "time"（Nnue 后端）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub budget_mode: Option<String>,
+    /// NNUE 搜索深度（Nnue 后端，depth_nodes 模式）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nnue_depth: Option<i32>,
-    /// NNUE 节点预算（Nnue 后端）
+    /// NNUE 节点预算（Nnue 后端，nodes/depth_nodes 模式）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nnue_budget: Option<u64>,
+    /// NNUE 时间预算毫秒（Nnue 后端，time 模式）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nnue_time_ms: Option<u64>,
+    /// 搜索硬超时毫秒（Nnue 后端，全模式生效）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub search_timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -302,16 +340,20 @@ impl MctsStatsDto {
     }
 }
 
-/// 一次 NNUE Expectimax 搜索统计（对齐 Tauri 后端 NNUE 对手语义）。
+/// 一次 Expectimax 搜索统计（对齐 banqi-app `NnueSearchStats`）。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NnueStatsDto {
     /// 推理后端标识（恒为 "nnue"）
     pub engine: String,
-    /// 请求的迭代加深深度上限
+    /// 生效的预算模式："nodes" / "depth_nodes" / "time"
+    pub mode: String,
+    /// 请求的迭代加深深度上限（0 = 不限，由预算/超时控制）
     pub depth: i32,
-    /// 请求的节点预算
+    /// 请求的节点预算（0 = 不限）
     pub budget: u64,
+    /// 生效的时间上限毫秒（模式时间与硬超时的较小者）
+    pub time_limit_ms: u64,
     /// 实际消耗的节点数
     pub nodes: u64,
     /// 完成的最深迭代层数
@@ -388,10 +430,16 @@ pub struct SettingsResp {
     pub mcts_sims: usize,
     /// 当前默认 Expectimax 强引擎节点预算
     pub engine_budget: u64,
-    /// 当前默认 NNUE 搜索深度
+    /// 当前默认 NNUE 预算模式："nodes" / "depth_nodes" / "time"
+    pub nnue_budget_mode: String,
+    /// 当前默认 NNUE 搜索深度（depth_nodes 模式）
     pub nnue_depth: i32,
-    /// 当前默认 NNUE 节点预算
+    /// 当前默认 NNUE 节点预算（nodes/depth_nodes 模式）
     pub nnue_budget: u64,
+    /// 当前默认 NNUE 时间预算毫秒（time 模式）
+    pub nnue_time_ms: u64,
+    /// 当前默认搜索硬超时毫秒（全模式必选生效）
+    pub search_timeout_ms: u64,
 }
 
 #[derive(Debug, Serialize)]
