@@ -8,6 +8,8 @@ use uuid::Uuid;
 use banqi_core::core::env::types::Player;
 use banqi_core::core::env::PositionSnapshot;
 
+use banqi_app::sync::{read_lock, write_lock};
+
 use crate::ai;
 use crate::config::parse_variant;
 use crate::dto::{
@@ -92,13 +94,9 @@ pub async fn create_game(
         match engine {
             EngineKind::Nnue => {
                 // 建局即加载 + 布局校验：坏模型 / 跨变体权重在建局时报错而非对局中途
-                let evaluator = app
-                    .acquire_nnue_model(model_file_owned)
+                app.acquire_nnue_validated(model_file_owned, variant)
                     .await
                     .map_err(|e| ApiError::ModelUnavailable(format!("模型加载失败: {e}")))?;
-                evaluator
-                    .validate_layout(&variant.config())
-                    .map_err(|e| ApiError::ModelUnavailable(format!(".nnue 权重与变体 {} 不匹配: {e}", variant.as_str())))?;
             }
             EngineKind::MctsOnnx => {
                 #[cfg(feature = "onnx")]
@@ -142,7 +140,7 @@ pub async fn create_game(
 
     app.games
         .write()
-        .expect("games 锁中毒")
+        .unwrap_or_else(|e| e.into_inner())
         .insert(game_id, session);
     tracing::info!(
         game = %game_id,
@@ -160,7 +158,7 @@ pub async fn create_game(
 
 /// GET /api/games
 pub async fn list_games(State(app): State<SharedState>) -> Json<GameListResp> {
-    let games = app.games.read().expect("games 锁中毒");
+    let games = read_lock(&app.games);
     let mut summaries: Vec<GameSummary> =
         games.iter().map(|(id, s)| s.summary(*id)).collect();
     summaries.sort_by(|a, b| a.game_id.cmp(&b.game_id));
@@ -173,7 +171,7 @@ pub async fn get_game(
     Path(id): Path<String>,
 ) -> Result<Json<GameStateResp>, ApiError> {
     let game_id = parse_game_id(&id)?;
-    let games = app.games.read().expect("games 锁中毒");
+    let games = read_lock(&app.games);
     let s = games
         .get(&game_id)
         .ok_or_else(|| ApiError::GameNotFound(id.clone()))?;
@@ -186,12 +184,7 @@ pub async fn delete_game(
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     let game_id = parse_game_id(&id)?;
-    let removed = app
-        .games
-        .write()
-        .expect("games 锁中毒")
-        .remove(&game_id)
-        .is_some();
+    let removed = write_lock(&app.games).remove(&game_id).is_some();
     if removed {
         tracing::info!(game = %game_id, "删除对局");
         Ok(StatusCode::NO_CONTENT)
@@ -216,11 +209,11 @@ pub async fn move_piece(
 
     // 锁 1：人类走子（同步操作，立即释放，不跨 await）
     let (mut state, mover, human_view, ai_version) = {
-        let mut games = app.games.write().expect("games 锁中毒");
+        let mut games = write_lock(&app.games);
         let s = games
             .get_mut(&game_id)
             .ok_or_else(|| ApiError::GameNotFound(id.clone()))?;
-        let mover = s.current.current_player;
+        let mover = s.core.current.current_player;
         // 先走子（内部校验合法性/终局），再生成动作视图——
         // 非法动作直接 4xx，避免用越界 action 去查环境（core 内按索引访问会 panic）
         let outcome = s.apply_action(req.action)?;
@@ -233,7 +226,7 @@ pub async fn move_piece(
             outcome.winner
         );
         let state = s.view(game_id);
-        let ai_version = state.ai_to_move.then_some(s.version);
+        let ai_version = state.ai_to_move.then_some(s.core.version);
         (state, mover, human_view, ai_version)
     };
 
@@ -254,7 +247,7 @@ pub async fn move_piece(
             }
             None => {
                 // AI 结果作废（期间对局被并发修改）：返回当前实际状态
-                let games = app.games.read().expect("games 锁中毒");
+                let games = read_lock(&app.games);
                 if let Some(s) = games.get(&game_id) {
                     state = s.view(game_id);
                 }
@@ -276,11 +269,11 @@ pub async fn ai_move(
 
     // 锁 1：读取当前版本号（立即释放）
     let version = {
-        let games = app.games.read().expect("games 锁中毒");
+        let games = read_lock(&app.games);
         let s = games
             .get(&game_id)
             .ok_or_else(|| ApiError::GameNotFound(id.clone()))?;
-        s.version
+        s.core.version
     };
 
     match ai::run_ai_turn(&app, game_id, version).await? {
@@ -311,12 +304,12 @@ pub async fn bind_model(
 
     // 锁 1：校验 AI 已启用并取出变体（NNUE 布局校验用，立即释放）
     let variant = {
-        let games = app.games.read().expect("games 锁中毒");
+        let games = read_lock(&app.games);
         let s = games
             .get(&game_id)
             .ok_or_else(|| ApiError::GameNotFound(id.clone()))?;
         s.ai.as_ref().ok_or(ApiError::AiDisabled)?;
-        s.variant
+        s.core.variant
     };
 
     // 锁外预加载（blocking 线程池，可能耗时；坏文件在此报错）
@@ -347,7 +340,7 @@ pub async fn bind_model(
     }
 
     // 锁 2：写入绑定
-    let mut games = app.games.write().expect("games 锁中毒");
+    let mut games = write_lock(&app.games);
     let s = games
         .get_mut(&game_id)
         .ok_or_else(|| ApiError::GameNotFound(id.clone()))?;
@@ -367,7 +360,7 @@ pub async fn undo(
 ) -> Result<Json<GameStateResp>, ApiError> {
     let game_id = parse_game_id(&id)?;
 
-    let mut games = app.games.write().expect("games 锁中毒");
+    let mut games = write_lock(&app.games);
     let s = games
         .get_mut(&game_id)
         .ok_or_else(|| ApiError::GameNotFound(id.clone()))?;

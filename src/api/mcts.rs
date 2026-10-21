@@ -7,6 +7,10 @@ use axum::extract::{Path, State};
 use axum::Json;
 use uuid::Uuid;
 
+use banqi_app::sync::read_lock;
+#[cfg(feature = "onnx")]
+use banqi_app::sync::write_lock;
+
 use crate::error::ApiError;
 use crate::mcts::{MctsEdge, MctsNodeBoard, MctsNodeDetail, MctsRootInfo};
 use crate::state::SharedState;
@@ -24,7 +28,7 @@ pub async fn root(
     Path(id): Path<String>,
 ) -> Result<Json<MctsRootInfo>, ApiError> {
     let game_id = Uuid::parse_str(&id).map_err(|_| ApiError::BadRequest(format!("非法对局 ID: {id}")))?;
-    let games = app.games.read().expect("games 锁中毒");
+    let games = read_lock(&app.games);
     let s = games
         .get(&game_id)
         .ok_or_else(|| ApiError::GameNotFound(id.clone()))?;
@@ -38,7 +42,7 @@ pub async fn children(
     Path((id, node)): Path<(String, String)>,
 ) -> Result<Json<Vec<MctsEdge>>, ApiError> {
     let (game_id, node_id) = parse_ids(id, node)?;
-    let games = app.games.read().expect("games 锁中毒");
+    let games = read_lock(&app.games);
     let s = games.get(&game_id).ok_or(ApiError::GameNotFound(game_id.to_string()))?;
     let tree = s.mcts_tree.as_ref().ok_or(ApiError::MctsTreeMissing)?;
     Ok(Json(tree.children(node_id)))
@@ -50,7 +54,7 @@ pub async fn detail(
     Path((id, node)): Path<(String, String)>,
 ) -> Result<Json<MctsNodeDetail>, ApiError> {
     let (game_id, node_id) = parse_ids(id, node)?;
-    let games = app.games.read().expect("games 锁中毒");
+    let games = read_lock(&app.games);
     let s = games.get(&game_id).ok_or(ApiError::GameNotFound(game_id.to_string()))?;
     let tree = s.mcts_tree.as_ref().ok_or(ApiError::MctsTreeMissing)?;
     tree.detail(node_id)
@@ -64,7 +68,7 @@ pub async fn board(
     Path((id, node)): Path<(String, String)>,
 ) -> Result<Json<MctsNodeBoard>, ApiError> {
     let (game_id, node_id) = parse_ids(id, node)?;
-    let games = app.games.read().expect("games 锁中毒");
+    let games = read_lock(&app.games);
     let s = games.get(&game_id).ok_or(ApiError::GameNotFound(game_id.to_string()))?;
     let tree = s.mcts_tree.as_ref().ok_or(ApiError::MctsTreeMissing)?;
     tree.board(node_id)
@@ -84,7 +88,7 @@ pub async fn search(
 
     // 锁 1：读取搜索所需数据（立即释放，不跨 await）
     let (variant, snap, sims, model_file) = {
-        let games = app.games.read().expect("games 锁中毒");
+        let games = read_lock(&app.games);
         let s = games
             .get(&game_id)
             .ok_or_else(|| ApiError::GameNotFound(id.clone()))?;
@@ -95,7 +99,7 @@ pub async fn search(
                     .into(),
             )
         })?;
-        (s.variant, s.current.clone(), sims, model_file)
+        (s.core.variant, s.core.current.clone(), sims, model_file)
     };
 
     // 锁外取对局绑定的模型（随用随加载：缓存命中直接返回，首次使用时加载）
@@ -110,7 +114,7 @@ pub async fn search(
         .ok_or_else(|| ApiError::Internal("MCTS 未返回动作".to_string()))?;
     let info = tree.root_info();
 
-    let mut games = app.games.write().expect("games 锁中毒");
+    let mut games = write_lock(&app.games);
     if let Some(s) = games.get_mut(&game_id) {
         s.mcts_tree = Some(tree);
     }

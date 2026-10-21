@@ -12,6 +12,9 @@ use std::sync::Arc;
 
 use uuid::Uuid;
 
+#[cfg(feature = "onnx")]
+use banqi_app::with_env;
+use banqi_app::sync::{read_lock, write_lock};
 use banqi_core::core::env::DarkChessEnv;
 #[cfg(feature = "onnx")]
 use banqi_core::core::env::{PositionSnapshot, Variant};
@@ -113,7 +116,7 @@ fn plan_ai_turn(
     game_id: Uuid,
     expect_version: u64,
 ) -> Result<AiTurnPlan, ApiError> {
-    let games = app.games.read().expect("games 锁中毒");
+    let games = read_lock(&app.games);
     let s = games
         .get(&game_id)
         .ok_or_else(|| ApiError::GameNotFound(game_id.to_string()))?;
@@ -124,10 +127,10 @@ fn plan_ai_turn(
     if !s.ai_to_move() {
         return Err(ApiError::NotAiTurn);
     }
-    if s.version != expect_version {
+    if s.core.version != expect_version {
         return Err(ApiError::BadRequest(format!(
             "版本号已变化: 期望 {expect_version}，当前 {}",
-            s.version
+            s.core.version
         )));
     }
     let model_file = s
@@ -136,8 +139,8 @@ fn plan_ai_turn(
         .ok_or_else(|| ApiError::BadRequest("对局未绑定模型文件".into()))?;
     Ok(AiTurnPlan {
         #[cfg(feature = "onnx")]
-        variant: s.variant,
-        snap: s.current.clone(),
+        variant: s.core.variant,
+        snap: s.core.current.clone(),
         engine: ai.engine,
         model_file,
         #[cfg(feature = "onnx")]
@@ -200,15 +203,15 @@ pub async fn run_ai_turn(
     };
 
     // 锁 2：校验版本号后落子
-    let mut games = app.games.write().expect("games 锁中毒");
+    let mut games = write_lock(&app.games);
     let s = games
         .get_mut(&game_id)
         .ok_or_else(|| ApiError::GameNotFound(game_id.to_string()))?;
-    if s.version != expect_version {
+    if s.core.version != expect_version {
         tracing::info!(
             game = %game_id,
             "AI 结果作废: 版本号 {expect_version} != {}（期间对局已被修改）",
-            s.version
+            s.core.version
         );
         return Ok(None);
     }
@@ -217,7 +220,7 @@ pub async fn run_ai_turn(
         return Ok(None);
     }
     let view = s.action_view(action);
-    let player = s.current.current_player;
+    let player = s.core.current.current_player;
     let outcome = s.apply_action(action)?;
     // 保留本次搜索树供前端查询（下一步对局状态变更后仍可浏览，直到下次搜索替换；
     // NNUE 对手无搜索树，落子后清空旧树避免展示过期决策）

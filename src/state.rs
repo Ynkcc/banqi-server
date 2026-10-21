@@ -1,220 +1,38 @@
-//! 应用状态：模型池（按变体，随用随加载）、对局存储与会话（快照栈 / 版本号 / AI 配置）。
+//! 应用状态：模型池（按变体，随用随加载）、对局存储与会话（AI 配置 + 版本号）。
 //!
-//! 会话不持有具体环境类型：`GameSession` 只存 `Variant` + `PositionSnapshot`
-//! （完整快照：棋盘/行棋方/血量/步数/暗子袋/阵亡计数），所有环境操作经
-//! `with_env!` 宏重建泛型环境执行 —— server 侧不假设变体种类。
+//! 会话核心（变体 / 局面快照 / 悔棋 / 棋谱不变量）为 `banqi_app::session::SnapshotSession`
+//! （单一真源，经 `with_env!` 重建泛型环境执行——server 侧不假设变体种类）；
+//! 本 crate 的 `GameSession` 在其上叠加 server 特有的 AI 配置、绑定模型与搜索树。
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::{Mutex, RwLock};
+use std::path::Path;
+use std::sync::{RwLock, Arc};
 
 use uuid::Uuid;
 
-use banqi_core::core::env::error::EnvError;
+use banqi_app::session::SnapshotSession;
+use banqi_app::view::{project, over_reason};
 use banqi_core::core::env::types::Player;
-use banqi_core::core::env::{GameEnv, MoveHistory, MoveRecord, PositionSnapshot, SnapshotEnv, Variant};
+use banqi_core::core::env::{PositionSnapshot, Variant};
 use banqi_engine::nnue::NnueEvaluator;
-#[cfg(feature = "onnx")]
-use banqi_engine::inference::onnx::OnnxModel;
 
 use crate::config::ServerConfig;
 use crate::dto::{
-    ActionView, AiInfoView, CellView, GameStateResp, HistoryMoveView, PieceView, piece_type_str,
-    player_str, winner_str,
+    piece_type_str, player_str, winner_str, ActionView, AiInfoView, CellView, GameStateResp,
+    HistoryMoveView, PieceView,
 };
 use crate::error::ApiError;
 use crate::variant;
 
 // ============================================================================
-// 模型池：只提供「文件清单 + 按路径加载缓存」。
-//
-// 同时支持两类模型文件，按扩展名分派推理后端：
-// - `.onnx` → MCTS + ONNX（需 onnx feature）；
-// - `.nnue` → Expectimax + NNUE（无外部依赖，始终可用）。
-//
-// 不做任何变体关联：不要求文件命名、不预判模型所属变体、无默认兜底。
-// 用户在前端自行选择模型文件并与对局绑定（`GameSession.model_file`）；
-// 输入维度不匹配不做预校验（NNUE 建局/绑定时校验布局，ONNX 由推理时 ort 报错）。
+// 模型池与推理后端分派：实现收敛到 banqi-app（单一真源），此处仅别名/re-export
 // ============================================================================
 
-/// AI 推理后端类型（由对局绑定模型文件的扩展名决定）。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum EngineKind {
-    /// MCTS + ONNX（.onnx）
-    MctsOnnx,
-    /// Expectimax + NNUE（.nnue）
-    Nnue,
-}
-
-impl EngineKind {
-    /// 由模型文件扩展名推断推理后端（`.nnue` → NNUE，其余按 ONNX 处理）。
-    pub fn from_model_file(file: &str) -> Self {
-        if file.to_ascii_lowercase().ends_with(".nnue") {
-            Self::Nnue
-        } else {
-            Self::MctsOnnx
-        }
-    }
-
-    /// 机器可读标识（DTO 下发用）。
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::MctsOnnx => "mcts-onnx",
-            Self::Nnue => "nnue",
-        }
-    }
-}
+pub use banqi_app::models::EngineKind;
 
 /// 模型池：启动只**扫描**模型目录得到文件清单（不加载权重）；
 /// 按文件路径随用随加载并**常驻缓存**，供所有对局复用。
-pub struct Models {
-    /// 扫描到的模型文件清单（`rescan` 刷新；含 .onnx 与 .nnue）
-    files: Mutex<Vec<String>>,
-    /// 已加载 ONNX 模型缓存（key = 文件路径）。加载持锁串行化：并发首用同一文件只加载一次。
-    #[cfg(feature = "onnx")]
-    loaded_onnx: Mutex<HashMap<String, Arc<OnnxModel>>>,
-    /// 已加载 NNUE 评估器缓存（key = 文件路径；无 feature 依赖，始终可用）。
-    loaded_nnue: Mutex<HashMap<String, Arc<NnueEvaluator>>>,
-    models_dir: PathBuf,
-    #[cfg(feature = "onnx")]
-    sessions: usize,
-    #[cfg(feature = "onnx")]
-    device: String,
-    /// NN 推理缓存条目上限（0 = 关闭；透传给 `OnnxModel::with_sessions_cached`）
-    #[cfg(feature = "onnx")]
-    nn_cache_entries: usize,
-}
-
-impl Models {
-    /// 扫描 `models_dir` 下全部 `*.onnx` / `*.nnue`（只记录文件清单，不加载权重）。
-    pub fn new(models_dir: &Path, sessions: usize, device: &str, nn_cache_entries: usize) -> Self {
-        #[cfg(not(feature = "onnx"))]
-        let _ = (sessions, device, nn_cache_entries);
-        let models = Self {
-            files: Mutex::new(Vec::new()),
-            #[cfg(feature = "onnx")]
-            loaded_onnx: Mutex::new(HashMap::new()),
-            loaded_nnue: Mutex::new(HashMap::new()),
-            models_dir: models_dir.to_path_buf(),
-            #[cfg(feature = "onnx")]
-            sessions,
-            #[cfg(feature = "onnx")]
-            device: device.to_string(),
-            #[cfg(feature = "onnx")]
-            nn_cache_entries,
-        };
-        models.rescan();
-        models
-    }
-
-    fn rescan(&self) {
-        let paths = banqi_app::models::scan_model_files(&self.models_dir, &["onnx", "nnue"], 4);
-        let files: Vec<String> = paths
-            .into_iter()
-            .map(|p| p.to_string_lossy().to_string())
-            .collect();
-        let n = files.len();
-        *self.files.lock().expect("models files 锁中毒") = files;
-        if n == 0 {
-            tracing::warn!(
-                "模型目录未找到任何 .onnx / .nnue ({}，含子目录)",
-                self.models_dir.display()
-            );
-        } else {
-            tracing::info!(
-                "已扫描到 {n} 个模型文件（{}），随用随加载：对局绑定的文件首次使用时才加载权重",
-                self.models_dir.display()
-            );
-        }
-    }
-
-    /// 模型文件清单（每次调用重扫，保证前端下拉最新；只读目录，开销可忽略）。
-    pub fn files(&self) -> Vec<String> {
-        self.rescan();
-        self.files.lock().expect("models files 锁中毒").clone()
-    }
-
-    /// 随用随加载 ONNX 模型（缓存命中直接返回；未加载则构建 ort 会话并常驻缓存。
-    /// 加载持锁串行化，并发首用同一文件只加载一次）。
-    /// 模型与变体是否匹配不做预判——形状不匹配由推理时 ort 忠实报错。
-    #[cfg(feature = "onnx")]
-    pub fn acquire_onnx(&self, file: &str) -> Result<Arc<OnnxModel>, String> {
-        let mut loaded = self.loaded_onnx.lock().expect("models loaded 锁中毒");
-        if let Some(m) = loaded.get(file) {
-            return Ok(Arc::clone(m));
-        }
-        tracing::info!(
-            "首次使用，加载 ONNX 模型: {file}（会话池 {}，device {}，nncache {}）",
-            self.sessions,
-            self.device,
-            if self.nn_cache_entries > 0 {
-                format!("开启（≤{} 条）", self.nn_cache_entries)
-            } else {
-                "关闭".to_string()
-            }
-        );
-        let model = Arc::new(OnnxModel::with_sessions_cached(
-            file,
-            &self.device,
-            self.sessions,
-            self.nn_cache_entries,
-        )?);
-        loaded.insert(file.to_string(), Arc::clone(&model));
-        Ok(model)
-    }
-
-    /// 无 onnx feature 时的 ONNX 加载回退：明确报错（NNUE 对手仍可用）。
-    #[cfg(not(feature = "onnx"))]
-    #[allow(dead_code)]
-    pub fn acquire_onnx(&self, _file: &str) -> Result<std::convert::Infallible, String> {
-        Err("服务编译未启用 onnx 推理，ONNX 模型不可用（.nnue 对手仍可用）".to_string())
-    }
-
-    /// 随用随加载 NNUE 评估器（量化前向权重，纯 CPU 计算，无 feature 依赖）。
-    /// 加载即解析自解释头部并校验网络维度常量；与变体的布局匹配在
-    /// 建局/绑定时以 `validate_layout` 显式校验。
-    pub fn acquire_nnue(&self, file: &str) -> Result<Arc<NnueEvaluator>, String> {
-        let mut loaded = self.loaded_nnue.lock().expect("models nnue 锁中毒");
-        if let Some(e) = loaded.get(file) {
-            return Ok(Arc::clone(e));
-        }
-        tracing::info!("首次使用，加载 NNUE 模型: {file}");
-        let evaluator = Arc::new(NnueEvaluator::load_from_file(file)?);
-        loaded.insert(file.to_string(), Arc::clone(&evaluator));
-        Ok(evaluator)
-    }
-
-    /// 模型文件清单与加载状态（健康检查用）：`(文件路径, 是否已加载)`。
-    pub fn loaded_files(&self) -> Vec<(String, bool)> {
-        self.files();
-        let loaded_keys: std::collections::HashSet<String> = {
-            #[cfg_attr(not(feature = "onnx"), allow(unused_mut))]
-            let mut set: std::collections::HashSet<String> = self
-                .loaded_nnue
-                .lock()
-                .expect("models nnue 锁中毒")
-                .keys()
-                .cloned()
-                .collect();
-            #[cfg(feature = "onnx")]
-            set.extend(
-                self.loaded_onnx
-                    .lock()
-                    .expect("models loaded 锁中毒")
-                    .keys()
-                    .cloned(),
-            );
-            set
-        };
-        self.files
-            .lock()
-            .expect("models files 锁中毒")
-            .iter()
-            .map(|f| (f.clone(), loaded_keys.contains(f)))
-            .collect()
-    }
-}
+pub type Models = banqi_app::models::ModelPool;
 
 // ============================================================================
 // 对局会话
@@ -238,16 +56,10 @@ pub struct AiConfig {
     pub nnue_budget: u64,
 }
 
-/// 单局状态：变体 + 当前快照 + 快照栈（悔棋）+ AI 配置 + 版本号。
+/// 单局状态：快照式会话核心 + AI 配置 + 绑定模型 + 搜索树。
 pub struct GameSession {
-    pub variant: Variant,
-    /// 当前局面完整快照
-    pub current: PositionSnapshot,
-    /// 走子前的快照栈（悔棋；快照为棋盘常量级开销）
-    pub history: MoveHistory,
-    /// 单调递增版本号：任何状态变更（走子/悔棋）+1；
-    /// AI 异步决策完成后校验版本号，不一致即丢弃结果。
-    pub version: u64,
+    /// 对局核心（变体/当前快照/悔棋历史/版本号；走子不变量在 banqi-app 单点维护）
+    pub core: SnapshotSession,
     pub ai: Option<AiConfig>,
     /// 与对局绑定的模型文件（用户显式选择，建局必需）。
     /// AI 回合与手动搜索均使用该文件（随用随加载，常驻缓存）。
@@ -259,10 +71,7 @@ pub struct GameSession {
 impl GameSession {
     pub fn new(variant: Variant, ai: Option<AiConfig>, model_file: Option<String>) -> Self {
         Self {
-            variant,
-            current: variant::initial_snapshot(variant),
-            history: MoveHistory::new(),
-            version: 0,
+            core: SnapshotSession::new(variant),
             ai,
             model_file,
             mcts_tree: None,
@@ -277,70 +86,29 @@ impl GameSession {
         model_file: Option<String>,
     ) -> Self {
         Self {
-            variant,
-            current: snapshot,
-            history: MoveHistory::new(),
-            version: 0,
+            core: SnapshotSession::from_snapshot(variant, snapshot),
             ai,
             model_file,
             mcts_tree: None,
         }
     }
 
-    /// 终局判定（经 with_env 重建环境检查）。
-    fn is_over(&self) -> bool {
-        let (terminated, truncated, _) = self.over_state();
-        terminated || truncated
-    }
-
     /// `(terminated, truncated, winner)`。
     pub fn over_state(&self) -> (bool, bool, Option<i32>) {
-        with_env!(self.variant, &self.current, env => variant::game_over(&env))
-            .expect("快照由本服务生成，重建不应失败")
+        self.core.over_state()
     }
 
-    /// 应用动作（校验终局与合法性；维护快照栈、决策历史与版本号）。
-    pub fn apply_action(&mut self, action: usize) -> Result<variant::StepOutcome, ApiError> {
-        if self.is_over() {
-            return Err(ApiError::GameOver);
-        }
-        let legal = self.legal_actions();
-        if !legal.contains(&action) {
-            return Err(ApiError::IllegalAction { action });
-        }
-        let prev = self.current.clone();
-        self.history.push(prev.clone());
-        // 合法性已预检，step 失败只可能是内部不变量问题
-        let (outcome, snap, revealed) = with_env!(self.variant, &self.current, env => {
-            let o = variant::step(&mut env, action).expect("动作已通过合法性与终局预检");
-            // 本步实际翻出的棋子（翻棋/吃暗子的真实结果，快照差分推不出）
-            let revealed = GameEnv::last_revealed(&env);
-            (o, env.to_snapshot(), revealed)
-        })
-        .map_err(|e: EnvError| ApiError::Internal(format!("重建环境失败: {e}")))?;
-        self.history.record(MoveRecord::from_step(&prev, &snap, action, revealed));
-        self.current = snap;
-        self.version += 1;
-        Ok(outcome)
+    /// 应用动作（校验终局与合法性；快照栈/决策历史/版本号由核心维护）。
+    pub fn apply_action(
+        &mut self,
+        action: usize,
+    ) -> Result<variant::StepOutcome, ApiError> {
+        self.core.apply_action(action).map_err(ApiError::from)
     }
 
     /// 悔棋：按快照逐帧回退 `steps` 步（对局结束后不可悔棋）。
     pub fn undo(&mut self, steps: usize) -> Result<(), ApiError> {
-        if self.is_over() {
-            return Err(ApiError::GameOver);
-        }
-        if steps == 0 {
-            return Err(ApiError::BadRequest("steps 必须至少为 1".to_string()));
-        }
-        let snap = self.history.undo_steps(steps).ok_or_else(|| {
-            ApiError::BadRequest(format!(
-                "可回退步数不足: 请求 {steps}，当前仅 {} 步历史",
-                self.history.len()
-            ))
-        })?;
-        self.current = snap;
-        self.version += 1;
-        Ok(())
+        self.core.undo_steps(steps).map_err(ApiError::from)
     }
 
     /// 悔棋到当前行棋方上次行动前：回退快照直至回到「当前行棋方即将行动」的局面。
@@ -348,35 +116,22 @@ impl GameSession {
     /// AI 对局中（AI 走完后轮到人类）会一并回退 AI 与人类各一步；
     /// PvP 中即回退最近一步。当前玩家尚未行动过时返回错误。
     pub fn undo_to_current_player(&mut self) -> Result<(), ApiError> {
-        if self.is_over() {
-            return Err(ApiError::GameOver);
-        }
-        let target = self.current.current_player;
-        let snap = self.history.undo_to_player_turn(target).ok_or_else(|| {
-            ApiError::BadRequest("没有可悔的棋步（当前玩家尚未行动过）".to_string())
-        })?;
-        self.current = snap;
-        self.version += 1;
-        Ok(())
+        self.core.undo_to_current_player().map_err(ApiError::from)
     }
 
     /// 当前合法动作列表。
     pub fn legal_actions(&self) -> Vec<usize> {
-        with_env!(self.variant, &self.current, env => variant::legal_actions(&env))
-            .unwrap_or_default()
+        self.core.legal_actions()
     }
 
     /// 单个动作的结构化视图（坐标 + 机会标记）。
     pub fn action_view(&self, action: usize) -> ActionView {
-        let coords = variant::coords_for_action(self.variant, action).unwrap_or_default();
+        let coords = variant::coords_for_action(self.core.variant, action).unwrap_or_default();
         ActionView {
             action,
             from: coords.first().copied().unwrap_or(action),
             to: coords.last().copied().unwrap_or(action),
-            is_chance: with_env!(self.variant, &self.current, env => {
-                GameEnv::is_chance_action(&env, action)
-            })
-            .unwrap_or(false),
+            is_chance: self.core.is_chance_action(action),
         }
     }
 
@@ -385,7 +140,7 @@ impl GameSession {
         match self.ai {
             Some(ai) => {
                 let (terminated, truncated, _) = self.over_state();
-                !terminated && !truncated && self.current.current_player == ai.player
+                !terminated && !truncated && self.core.current.current_player == ai.player
             }
             None => false,
         }
@@ -394,28 +149,29 @@ impl GameSession {
     /// 当前是否可悔棋：对局未结束，且历史中存在「当前行棋方上次行动前」的快照
     ///（悔棋总是回到当前行棋方自己上次行动前，可连续触发以反悔所有自己的行动）。
     pub fn undoable(&self) -> bool {
-        !self.is_over() && self.history.undoable(self.current.current_player)
+        self.core.undoable()
     }
 
     /// 当前完整状态视图（快照字段 + config 推导 + 泛型环境求合法动作）。
     pub fn view(&self, game_id: Uuid) -> GameStateResp {
-        let snap = &self.current;
-        let cfg = self.variant.config();
+        let snap = &self.core.current;
+        let cfg = self.core.variant.config();
         let (terminated, truncated, winner) = self.over_state();
 
-        // 棋盘视图（行优先；暗子不泄露真实身份）
-        let board: Vec<CellView> = snap
-            .slots
+        // 棋盘视图（行优先；暗子不泄露真实身份）：结构化投影收敛在 banqi-app::view
+        let proj = project(snap);
+        let board: Vec<CellView> = proj
+            .cells
             .iter()
             .enumerate()
-            .map(|(index, slot)| {
-                use banqi_core::core::env::Slot::*;
-                let (state, piece) = match slot {
+            .map(|(index, cell)| {
+                use banqi_app::view::CellState::*;
+                let (state, piece) = match cell.state {
                     Empty => ("empty", None),
                     Hidden => ("hidden", None),
-                    Revealed(p) => (
+                    Revealed => (
                         "revealed",
-                        Some(PieceView {
+                        cell.piece.map(|p| PieceView {
                             piece_type: piece_type_str(p.piece_type),
                             side: player_str(p.player),
                         }),
@@ -439,49 +195,20 @@ impl GameSession {
             .collect();
 
         // 阵亡 / 隐藏棋子列表（按型展开；hidden 计数可由公开信息推导，不泄露暗子身份）
-        use banqi_core::core::env::types::PieceType;
-        let piece_type_names: [String; 7] = [
-            PieceType::Soldier,
-            PieceType::Cannon,
-            PieceType::Horse,
-            PieceType::Chariot,
-            PieceType::Elephant,
-            PieceType::Advisor,
-            PieceType::General,
-        ]
-        .map(piece_type_str);
-        let mut dead_red: Vec<String> = Vec::new();
-        let mut dead_black: Vec<String> = Vec::new();
-        for (player_idx, out) in [(0usize, &mut dead_red), (1, &mut dead_black)] {
-            for t in 0..7 {
-                for _ in 0..snap.dead_counts[player_idx][t] {
-                    out.push(piece_type_names[t].clone());
-                }
-            }
-        }
-        let hidden_red: Vec<String> = snap
-            .hidden_bag
+        let dead_red: Vec<String> = proj.dead[0].iter().map(|t| piece_type_str(*t)).collect();
+        let dead_black: Vec<String> = proj.dead[1].iter().map(|t| piece_type_str(*t)).collect();
+        let hidden_red: Vec<String> = proj.hidden[0]
             .iter()
-            .filter(|p| p.player == banqi_core::core::env::types::Player::Red)
             .map(|p| piece_type_str(p.piece_type))
             .collect();
-        let hidden_black: Vec<String> = snap
-            .hidden_bag
+        let hidden_black: Vec<String> = proj.hidden[1]
             .iter()
-            .filter(|p| p.player == banqi_core::core::env::types::Player::Black)
             .map(|p| piece_type_str(p.piece_type))
             .collect();
 
         let over = terminated || truncated;
-        let over_reason = if !over {
-            None
-        } else if matches!(winner, Some(1) | Some(-1)) {
-            Some("checkmate".to_string())
-        } else if truncated {
-            Some("max_steps".to_string())
-        } else {
-            Some("draw".to_string())
-        };
+        let over_reason =
+            over_reason(over, truncated, winner).map(|r| r.as_str().to_string());
 
         let ai_view = match self.ai {
             Some(ai) => AiInfoView {
@@ -502,41 +229,34 @@ impl GameSession {
             },
         };
 
-        // 决策历史（棋谱）：机会动作附实际翻出的棋子
-        let history: Vec<HistoryMoveView> = self
-            .history
-            .records()
+        // 决策历史（棋谱）：公共标量投影收敛在 banqi-app::common
+        let history: Vec<HistoryMoveView> = banqi_app::common::history_entries(&self.core.history)
             .iter()
-            .enumerate()
-            .map(|(i, rec)| HistoryMoveView {
-                ply: i + 1,
-                player: player_str(rec.player),
-                action: rec.action,
-                from: rec.from,
-                to: rec.to,
-                is_flip: rec.is_flip,
-                is_chance: rec.is_chance,
-                is_capture: rec.is_capture,
-                revealed: rec
-                    .revealed
-                    .map(|p| PieceView {
-                        piece_type: piece_type_str(p.piece_type),
-                        side: player_str(p.player),
-                    }),
-                captured: rec
-                    .captured
-                    .map(|p| PieceView {
-                        piece_type: piece_type_str(p.piece_type),
-                        side: player_str(p.player),
-                    }),
+            .map(|e| HistoryMoveView {
+                ply: e.ply,
+                player: player_str(e.player),
+                action: e.action,
+                from: e.from,
+                to: e.to,
+                is_flip: e.is_flip,
+                is_chance: e.is_chance,
+                is_capture: e.is_capture,
+                revealed: e.revealed.map(|p| PieceView {
+                    piece_type: piece_type_str(p.piece_type),
+                    side: player_str(p.player),
+                }),
+                captured: e.captured.map(|p| PieceView {
+                    piece_type: piece_type_str(p.piece_type),
+                    side: player_str(p.player),
+                }),
             })
             .collect();
 
         GameStateResp {
             game_id: game_id.to_string(),
-            variant: self.variant.as_str().to_string(),
+            variant: self.core.variant.as_str().to_string(),
             fen: snap.to_fen(),
-            version: self.version,
+            version: self.core.version,
             current_player: player_str(snap.current_player),
             move_count: snap.move_counter as usize,
             total_steps: snap.total_step_counter as usize,
@@ -570,8 +290,8 @@ impl GameSession {
         let v = self.view(game_id);
         crate::dto::GameSummary {
             game_id: game_id.to_string(),
-            variant: self.variant.as_str().to_string(),
-            version: self.version,
+            variant: self.core.variant.as_str().to_string(),
+            version: self.core.version,
             current_player: v.current_player,
             total_steps: v.total_steps,
             over: v.over,
@@ -681,7 +401,7 @@ impl AppState {
             .files()
             .into_iter()
             .filter(|f| {
-                std::path::Path::new(f)
+                Path::new(f)
                     .file_stem()
                     .and_then(|s| s.to_str())
                     .is_some_and(|s| s.eq_ignore_ascii_case(id))
@@ -703,7 +423,7 @@ impl AppState {
     /// 首次使用时加载权重）。加载（构建 ort 会话）在 blocking 线程池执行，
     /// 避免阻塞异步运行时；加载后常驻缓存，供所有对局复用。
     #[cfg(feature = "onnx")]
-    pub async fn acquire_model(self: &Arc<Self>, model_file: String) -> Result<Arc<OnnxModel>, String> {
+    pub async fn acquire_model(self: &Arc<Self>, model_file: String) -> Result<Arc<banqi_engine::inference::onnx::OnnxModel>, String> {
         let app = Arc::clone(self);
         tokio::task::spawn_blocking(move || app.models.acquire_onnx(&model_file))
             .await
@@ -720,6 +440,22 @@ impl AppState {
             .await
             .map_err(|e| format!("模型加载任务失败: {e}"))?
     }
+
+    /// 随用随加载 + 布局校验：取 NNUE 评估器并按变体配置显式校验
+    /// `.nnue` 权重布局（坏模型 / 跨变体权重在建局/绑定时报错而非对局中途）。
+    pub async fn acquire_nnue_validated(
+        self: &Arc<Self>,
+        model_file: String,
+        variant: Variant,
+    ) -> Result<Arc<NnueEvaluator>, String> {
+        let app = Arc::clone(self);
+        tokio::task::spawn_blocking(move || {
+            app.models
+                .acquire_nnue_validated(&model_file, &variant.config())
+        })
+        .await
+        .map_err(|e| format!("模型加载任务失败: {e}"))?
+    }
 }
 
 // ============================================================================
@@ -729,8 +465,8 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use banqi_app::sync::{read_lock, write_lock};
     use crate::config::ServerConfig;
-    use banqi_core::core::env::Variant;
 
     fn test_app() -> AppState {
         // models_dir 指向不存在的临时路径：模型池为空（仅告警），测试不加载 ONNX
@@ -748,5 +484,43 @@ mod tests {
         assert_eq!(app.default_sims(), 1);
         // 默认变体不依赖模型扫描
         assert_eq!(app.default_variant(), Variant::ALL[0]);
+    }
+
+    #[test]
+    fn session_delegates_apply_and_undo() {
+        let mut s = GameSession::new(Variant::DarkChess4x8, None, None);
+        assert!(!s.undoable());
+        // 非法动作：合法集合之外必存在
+        let illegal = (0..).find(|&a| !s.legal_actions().contains(&a)).expect("总有非法动作");
+        assert!(matches!(
+            s.apply_action(illegal),
+            Err(ApiError::IllegalAction { .. })
+        ));
+        // 红翻棋一步（换黑行棋，黑尚未行动 → 不可悔）
+        let flip = *s
+            .legal_actions()
+            .iter()
+            .find(|&&a| s.action_view(a).is_chance)
+            .expect("初始局面必有可翻棋动作");
+        s.apply_action(flip).expect("翻棋应成功");
+        assert!(!s.undoable());
+        // 黑再翻一步后轮回红方：可悔到红方上次行动前
+        let flip2 = *s
+            .legal_actions()
+            .iter()
+            .find(|&&a| s.action_view(a).is_chance)
+            .expect("仍可翻棋");
+        s.apply_action(flip2).expect("第二次翻棋应成功");
+        assert!(s.undoable());
+        s.undo_to_current_player().expect("悔棋应成功");
+        assert_eq!(s.core.version, 3);
+    }
+
+    #[test]
+    fn read_write_lock_recovery_helpers() {
+        let games: RwLock<HashMap<Uuid, GameSession>> = RwLock::new(HashMap::new());
+        assert!(read_lock(&games).is_empty());
+        write_lock(&games).insert(Uuid::new_v4(), GameSession::new(Variant::DarkChess4x8, None, None));
+        assert_eq!(read_lock(&games).len(), 1);
     }
 }

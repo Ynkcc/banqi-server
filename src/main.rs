@@ -4,7 +4,6 @@
 //! - 推理：banqi-engine ONNX Runtime + Gumbel MCTS（默认 `onnx` feature，无 torch）
 //! - 变体无关：变体分发复用 banqi-core `for_variant_env!`，模型按文件名（变体 ID）动态加载
 
-#[macro_use]
 mod variant;
 
 mod ai;
