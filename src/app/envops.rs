@@ -42,6 +42,32 @@ pub fn initial_snapshot(variant: Variant) -> PositionSnapshot {
     })
 }
 
+/// 按变体 + 可选开局场景创建初始局面的完整快照。
+///
+/// `scenario = None` 时与 [`initial_snapshot`] 一致；传场景时经
+/// `DarkChessEnv::with_config_and_scenario` 按变体基准配置构造后取快照
+/// （各变体环境均为 DarkChessEnv 配置变体的包装，快照形状一致）。
+/// 变体不支持该场景 / 场景参数非法时返回错误（调用方映射为 400）。
+pub fn initial_snapshot_with_scenario(
+    variant: Variant,
+    scenario: Option<&banqi_core::core::env::OpeningScenario>,
+) -> Result<PositionSnapshot, EnvError> {
+    use banqi_core::core::env::error::EnvError;
+    let Some(s) = scenario else {
+        return Ok(initial_snapshot(variant));
+    };
+    if !s.supports_variant(variant) {
+        return Err(EnvError::InvalidScenario {
+            context: "该变体不支持此开局场景",
+        });
+    }
+    let env = banqi_core::core::env::DarkChessEnv::with_config_and_scenario(
+        variant.config(),
+        Some(*s),
+    )?;
+    Ok(env.to_snapshot())
+}
+
 /// 当前合法动作列表（升序）。
 pub fn legal_actions<E: GameEnv>(env: &E) -> Vec<usize> {
     let n = env.action_space_size();

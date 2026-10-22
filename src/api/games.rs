@@ -122,13 +122,22 @@ pub async fn create_game(
         },
     };
 
+    // 场景与 BFEN 互斥：BFEN 自带完整局面，场景只作用于初始局面的生成
+    if req.scenario.is_some() && fen_snapshot.is_some() {
+        return Err(ApiError::BadRequest(
+            "scenario 与 fen 互斥：BFEN 已携带完整局面，请二选一".to_string(),
+        ));
+    }
+
     // 红/黑槽位：模型类策略在此解析并预加载模型
     let slots = build_slots(&app, req.slots.as_ref(), variant).await?;
 
     let game_id = Uuid::new_v4();
     let session = match fen_snapshot {
         Some(snap) => GameSession::from_snapshot(variant, snap, slots),
-        None => GameSession::new(variant, slots),
+        None => {
+            GameSession::new_with_scenario(variant, req.scenario.as_ref(), slots)?
+        }
     };
     let state = session.view(game_id);
 
@@ -138,10 +147,11 @@ pub async fn create_game(
         .insert(game_id, session);
     tracing::info!(
         game = %game_id,
-        "创建对局: variant={}，red={}，black={}",
+        "创建对局: variant={}，red={}，black={}，scenario={:?}",
         variant.as_str(),
         state.slots.red.kind,
-        state.slots.black.kind
+        state.slots.black.kind,
+        req.scenario.as_ref().map(|s| s.kind_id())
     );
 
     Ok(Json(GameCreatedResp {

@@ -52,6 +52,9 @@ pub struct GameSession {
 }
 
 impl GameSession {
+    /// 按变体新建（标准初始局面；建局现统一走 [`Self::new_with_scenario`]，
+    /// 本方法供测试与扩展使用）。
+    #[allow(dead_code)]
     pub fn new(variant: Variant, slots: Slots) -> Self {
         Self {
             core: SnapshotSession::new(variant),
@@ -59,6 +62,22 @@ impl GameSession {
             mcts_tree: None,
             expectimax_tree: None,
         }
+    }
+
+    /// 按变体 + 可选开局场景新建（场景参数非法 / 变体不支持时报 400）。
+    /// `scenario = None` 时行为与 [`Self::new`] 完全一致。
+    pub fn new_with_scenario(
+        variant: Variant,
+        scenario: Option<&banqi_core::core::env::OpeningScenario>,
+        slots: Slots,
+    ) -> Result<Self, ApiError> {
+        let core = SnapshotSession::new_with_scenario(variant, scenario)?;
+        Ok(Self {
+            core,
+            slots,
+            mcts_tree: None,
+            expectimax_tree: None,
+        })
     }
 
     /// 由既有快照构建会话（BFEN 粘贴重建等场景；走子历史从空开始）。

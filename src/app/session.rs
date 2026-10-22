@@ -52,6 +52,8 @@ impl From<EnvError> for SessionError {
     fn from(e: EnvError) -> Self {
         match e {
             EnvError::IllegalAction { action } => SessionError::IllegalAction { action },
+            // 场景参数非法是输入数据问题：BadRequest 而非 Internal
+            EnvError::InvalidScenario { context } => SessionError::BadRequest(context.to_string()),
             other => SessionError::Internal(other.to_string()),
         }
     }
@@ -73,6 +75,19 @@ impl SnapshotSession {
     /// 按变体新建（初始局面）。
     pub fn new(variant: Variant) -> Self {
         Self::from_snapshot(variant, envops::initial_snapshot(variant))
+    }
+
+    /// 按变体 + 可选开局场景新建（初始局面）。
+    ///
+    /// `scenario = None` 时行为与 [`Self::new`] 完全一致；场景参数非法 /
+    /// 变体不支持该场景时返回 `BadRequest`。场景只影响初始局面的生成
+    /// （快照携带全部状态），此后走子 / 悔棋均为快照驱动，与场景无关。
+    pub fn new_with_scenario(
+        variant: Variant,
+        scenario: Option<&banqi_core::core::env::OpeningScenario>,
+    ) -> Result<Self, SessionError> {
+        let snap = envops::initial_snapshot_with_scenario(variant, scenario)?;
+        Ok(Self::from_snapshot(variant, snap))
     }
 
     /// 由既有快照构建会话（BFEN 粘贴重建等场景；走子历史从空开始）。
@@ -278,5 +293,37 @@ mod tests {
         s.apply_action(action).expect("翻棋应成功");
         let env = DarkChessEnv::from_snapshot(&s.current).expect("重建不应失败");
         assert_eq!(env.to_snapshot(), s.current);
+    }
+
+    /// 场景建局：初始快照按场景约束生成；变体不支持时报 BadRequest。
+    #[test]
+    fn scenario_session_builds_constrained_opening() {
+        use banqi_core::core::env::OpeningScenario;
+        let s = SnapshotSession::new_with_scenario(
+            Variant::DarkChess4x8,
+            Some(&OpeningScenario::with_general(5, 19)),
+        )
+        .expect("场景建局应成功");
+        let env = DarkChessEnv::from_snapshot(&s.current).expect("重建不应失败");
+        let slots = env.get_board_slots();
+        assert!(
+            matches!(&slots[5], banqi_core::core::env::Slot::Revealed(p) if p.short_name() == "R_Can"),
+            "sq5 应为红炮明子，实际 {:?}",
+            slots[5]
+        );
+        assert!(
+            matches!(&slots[19], banqi_core::core::env::Slot::Revealed(p) if p.short_name() == "B_Gen"),
+            "sq19 应为黑将明子，实际 {:?}",
+            slots[19]
+        );
+        assert_eq!(s.current.current_player, banqi_core::core::env::Player::Red);
+
+        // 4x8-fast 无炮无将：变体不支持场景 → BadRequest
+        let err = SnapshotSession::new_with_scenario(
+            Variant::DarkChess4x8Fast,
+            Some(&OpeningScenario::new(5)),
+        )
+        .expect_err("不支持的变体应报错");
+        assert!(matches!(err, SessionError::BadRequest(_)));
     }
 }

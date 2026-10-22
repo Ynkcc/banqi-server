@@ -95,10 +95,11 @@ impl IntoResponse for ApiError {
 
 impl From<banqi_core::core::env::error::EnvError> for ApiError {
     fn from(e: banqi_core::core::env::error::EnvError) -> Self {
+        use banqi_core::core::env::error::EnvError;
         match e {
-            banqi_core::core::env::error::EnvError::IllegalAction { action } => {
-                ApiError::IllegalAction { action }
-            }
+            EnvError::IllegalAction { action } => ApiError::IllegalAction { action },
+            // 场景参数非法是输入数据问题：400 而非 500
+            EnvError::InvalidScenario { context } => ApiError::BadRequest(context.to_string()),
             other => ApiError::Internal(other.to_string()),
         }
     }

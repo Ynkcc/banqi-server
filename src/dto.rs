@@ -16,6 +16,11 @@ pub struct CreateGameReq {
     /// BFEN 局面串：提供时由该局面重建对局（变体以 BFEN 自带标识为准）。
     #[serde(default)]
     pub fen: Option<String>,
+    /// 开局场景（可选；与 `fen` 互斥）。反序列化按 `"kind"` 内部标签分发，
+    /// 如 `{"kind":"cannon_strike_general","cannon_sq":5,"general_sq":21}`。
+    /// 未提供时走标准初始化行为。可用场景经 `GET /api/scenarios` 查询。
+    #[serde(default)]
+    pub scenario: Option<banqi_core::core::env::OpeningScenario>,
 }
 
 /// POST /api/games 请求中的双方槽位（缺省方 = Human）。
@@ -526,6 +531,25 @@ pub struct VariantInfo {
 #[derive(Debug, Serialize)]
 pub struct VariantsResp {
     pub variants: Vec<VariantInfo>,
+}
+
+/// 单个变体支持的开局场景（对齐前端 types.ts `VariantScenarios`）。
+///
+/// 场景条目直接序列化 banqi-core 的 [`banqi_core::core::env::ScenarioInfo`]
+/// （id / label / description / 参数 schema 单一真源在 core），前端按
+/// schema 动态渲染，不感知具体实现了哪些场景。
+#[derive(Debug, Serialize)]
+pub struct VariantScenarios {
+    /// 变体 ID（`Variant::as_str()`）
+    pub variant: String,
+    /// 支持的场景元信息（id 与 `OpeningScenario` serde `"kind"` 标签一致）
+    pub scenarios: Vec<&'static banqi_core::core::env::ScenarioInfo>,
+}
+
+/// GET /api/scenarios 响应：变体 → 支持的开局场景矩阵。
+#[derive(Debug, Serialize)]
+pub struct ScenariosResp {
+    pub variants: Vec<VariantScenarios>,
 }
 
 #[derive(Debug, Serialize)]

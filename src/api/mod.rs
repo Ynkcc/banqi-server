@@ -48,6 +48,7 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/games/{id}/nnue/node/{node}/board", get(nnue::board))
         .route("/api/health", get(health))
         .route("/api/variants", get(variants))
+        .route("/api/scenarios", get(scenarios))
         .route("/api/settings", get(get_settings).put(put_settings))
         .route("/api/capabilities", get(capabilities))
         .route("/api/models", get(list_models))
@@ -134,6 +135,21 @@ async fn variants() -> Json<VariantsResp> {
                     initial_health: cfg.initial_health,
                     max_consecutive_moves_for_draw: cfg.max_consecutive_moves_for_draw,
                 }
+            })
+            .collect(),
+    })
+}
+
+/// GET /api/scenarios：变体 → 支持的开局场景矩阵（零硬编码，随
+/// banqi-core 场景注册表动态更新；前端据此渲染场景选择项）。
+async fn scenarios() -> Json<crate::dto::ScenariosResp> {
+    Json(crate::dto::ScenariosResp {
+        variants: Variant::ALL
+            .iter()
+            .copied()
+            .map(|v| crate::dto::VariantScenarios {
+                variant: v.as_str().to_string(),
+                scenarios: banqi_core::core::env::supported_scenario_infos(v),
             })
             .collect(),
     })
