@@ -70,9 +70,9 @@ pub fn project(snap: &PositionSnapshot) -> BoardProjection {
     ];
     let mut dead: [Vec<PieceType>; 2] = Default::default();
     for (player_idx, out) in dead.iter_mut().enumerate() {
-        for t in 0..7 {
+        for (t, &pt) in types.iter().enumerate() {
             for _ in 0..snap.dead_counts[player_idx][t] {
-                out.push(types[t]);
+                out.push(pt);
             }
         }
     }

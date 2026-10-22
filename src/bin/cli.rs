@@ -287,6 +287,8 @@ macro_rules! set_opt {
     };
 }
 
+/// CLI 创建对局请求体：字段全部可选，逐项透传。
+#[allow(clippy::too_many_arguments)]
 fn create_game_body(
     variant: Option<String>,
     opponent: Option<String>,

@@ -266,7 +266,7 @@ mod tests {
         assert_eq!(OpponentKind::Nnue.as_str(), "Nnue");
         assert_eq!(OpponentKind::MctsOnnx.as_str(), "MctsOnnx");
         assert_eq!(OpponentKind::MctsDL.as_str(), "MctsDL");
-        assert!(OpponentKind::Rule(RuleKind::Random).needs_model() == false);
+        assert!(!OpponentKind::Rule(RuleKind::Random).needs_model());
         assert!(OpponentKind::Nnue.needs_model());
         assert!(OpponentKind::MctsOnnx.needs_model());
         assert!(OpponentKind::MctsDL.needs_model());

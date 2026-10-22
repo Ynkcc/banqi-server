@@ -306,8 +306,8 @@ pub fn nnue_search(
         action,
         NnueSearchStats {
             mode: budget.mode.as_str(),
-            depth: (budget.mode == BudgetMode::DepthNodes).then_some(cfg.max_depth).unwrap_or(0),
-            budget: (budget.mode != BudgetMode::Time).then_some(cfg.node_budget).unwrap_or(0),
+            depth: if budget.mode == BudgetMode::DepthNodes { cfg.max_depth } else { 0 },
+            budget: if budget.mode != BudgetMode::Time { cfg.node_budget } else { 0 },
             time_limit_ms: cfg.time_limit_ms,
             nodes,
             reached_depth,
@@ -349,8 +349,8 @@ pub fn nnue_search_tree(
             chosen_action: action,
             stats: NnueSearchStats {
                 mode: budget.mode.as_str(),
-                depth: (budget.mode == BudgetMode::DepthNodes).then_some(cfg.max_depth).unwrap_or(0),
-                budget: (budget.mode != BudgetMode::Time).then_some(cfg.node_budget).unwrap_or(0),
+                depth: if budget.mode == BudgetMode::DepthNodes { cfg.max_depth } else { 0 },
+                budget: if budget.mode != BudgetMode::Time { cfg.node_budget } else { 0 },
                 time_limit_ms: cfg.time_limit_ms,
                 nodes,
                 reached_depth,

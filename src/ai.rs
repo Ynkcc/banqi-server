@@ -246,6 +246,10 @@ fn plan_opponent_turn(
 ///
 /// 返回 `Ok(Some(...))` = 已落子；`Ok(None)` = 版本号变化，结果被丢弃
 /// （正常竞态，不视为错误）。
+/// [`apply_opponent_action`] 返回值：`(对局响应, 已执行动作, MCTS 统计, NNUE 统计)`。
+type OpponentApplyResult =
+    Result<Option<(GameStateResp, AppliedAction, Option<MctsStatsDto>, Option<NnueStatsDto>)>, ApiError>;
+
 fn apply_opponent_action(
     app: &Arc<AppState>,
     game_id: Uuid,
@@ -254,7 +258,7 @@ fn apply_opponent_action(
     mcts_tree: Option<crate::mcts::MctsTreeBox>,
     ex_tree: Option<crate::app::expectimax_view::ExpectimaxTree>,
     nnue_stats: Option<NnueStatsDto>,
-) -> Result<Option<(GameStateResp, AppliedAction, Option<MctsStatsDto>, Option<NnueStatsDto>)>, ApiError> {
+) -> OpponentApplyResult {
     let mut games = write_lock(&app.games);
     let s = get_mut_session(&mut games, &game_id.to_string(), game_id)?;
     if s.core.version != expect_version {
