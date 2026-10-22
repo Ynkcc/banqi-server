@@ -71,8 +71,8 @@ pub async fn board(
 /// POST /api/games/:id/mcts/search
 ///
 /// 在当前局面上手动触发一次 MCTS 搜索（不走子），替换会话中的浏览树。
-/// 推理后端分派与 feature 门控在 `ai::choose_mcts_by_engine` 单点维护；
-/// 上一棵树沿「AI 上手 → 对手上手」尝试复用。
+/// 决策分派收敛于 `app::player::decide`（单一真源）；模型取当前行棋方
+/// 策略槽位绑定的模型（无则按变体自动匹配），上一棵树尝试跨回合复用。
 pub async fn search(
     State(app): State<SharedState>,
     Path(id): Path<String>,
@@ -80,28 +80,46 @@ pub async fn search(
     let game_id = parse_game_id(&id)?;
 
     // 锁 1：读取搜索所需数据并取出上一棵树供复用（立即释放，不跨 await）
-    let (snap, sims, model_file, prev_tree) = {
+    let (snap, slot, prev_tree) = {
         let mut games = write_lock(&app.games);
         let s = get_mut_session(&mut games, &id, game_id)?;
-        let sims = s
-            .opponent
-            .as_ref()
-            .map(|o| o.mcts_sims)
-            .unwrap_or_else(|| app.default_sims());
-        let model_file = s.model_file.clone().ok_or_else(|| {
-            ApiError::BadRequest(
-                "对局未绑定模型文件，无法执行搜索（创建对局时指定 modelFile 或 PUT /api/games/:id/model 绑定）"
-                    .into(),
-            )
-        })?;
+        let current = s.core.current.current_player;
+        let slot = match s.slots.side(current) {
+            crate::app::player::PlayerSlot::Strategy {
+                kind,
+                model_file,
+                params,
+            } if kind.needs_model() => crate::app::player::PlayerSlot::Strategy {
+                kind: *kind,
+                model_file: model_file.clone(),
+                params: *params,
+            },
+            _ => {
+                // 当前方为 Human / 无模型策略：按变体自动匹配模型 + 服务器默认参数
+                let model_file = app.resolve_model_file(None, s.core.variant)?;
+                crate::app::player::PlayerSlot::strategy(
+                    crate::app::player::StrategyKind::from_engine_kind(
+                        crate::app::models::EngineKind::from_model_file(&model_file),
+                    ),
+                    Some(model_file),
+                    app.params(),
+                )
+            }
+        };
         let prev_tree = s.take_reusable_mcts_tree();
-        (s.core.current.clone(), sims, model_file, prev_tree)
+        (s.core.current.clone(), slot, prev_tree)
     };
 
-    // 锁外取对局绑定的模型（随用随加载：缓存命中直接返回，首次使用时加载），
-    // 按扩展名分派推理后端（单一真源：choose_mcts_by_engine）
-    let (_action, tree) =
-        crate::ai::choose_mcts_by_engine(&app, model_file, snap, sims, prev_tree).await?;
+    // 锁外搜索（blocking 线程池；模型随用随加载，缓存命中直接返回）
+    let app2 = std::sync::Arc::clone(&app);
+    let decision =
+        tokio::task::spawn_blocking(move || crate::app::player::decide(&snap, &slot, prev_tree, &app2.models))
+            .await
+            .map_err(|e| ApiError::Internal(format!("blocking 任务 join 失败: {e}")))?
+            .map_err(ApiError::Internal)?;
+    let tree = decision.mcts_tree.ok_or_else(|| {
+        ApiError::BadRequest("所选模型不产生 MCTS 搜索树（.nnue 为 Expectimax 叶评估后端，请用 POST /api/games/:id/nnue/search）".into())
+    })?;
     let info = tree.root_info();
 
     let mut games = write_lock(&app.games);

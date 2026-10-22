@@ -357,9 +357,14 @@ mod tests {
         assert!(v.scalars.last_action.is_none());
         assert!(!v.scalars.fen.is_empty());
         assert!(!v.undoable);
-        // 初始局面只有翻棋类合法动作（均为机会动作）
+        // 初始局面：布局随机（可能预翻若干棋子），合法动作只可能是
+        // ① 机会动作（翻棋 / 吃暗子）；② 当前方的已翻明子的移动/吃明子
         assert!(!v.legal_actions.is_empty());
-        assert!(v.legal_actions.iter().all(|a| a.is_chance));
+        assert!(v.legal_actions.iter().all(|a| {
+            a.is_chance
+                || v.cells[a.from].state == CellState::Revealed
+                    && v.cells[a.from].piece.map(|p| p.player) == Some(Player::Red)
+        }));
         assert!(v.history.is_empty());
     }
 

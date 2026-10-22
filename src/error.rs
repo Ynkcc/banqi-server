@@ -16,9 +16,9 @@ pub enum ApiError {
     /// 对局已结束，不能再走子/悔棋
     #[error("对局已结束")]
     GameOver,
-    /// 对局未启用对手（本地双人 PvP）
-    #[error("对局未启用对手（本地双人模式）")]
-    AiDisabled,
+    /// 当前行棋方由用户控制（Human 槽位），无策略可执行
+    #[error("当前行棋方由用户控制（可将其槽位设为策略托管，或用 /dry-run 获取建议走法）")]
+    HumanTurn,
     /// 该对局暂无 MCTS 搜索树（AI 未走过子且未手动搜索）
     #[error("暂无 MCTS 搜索树：等待 AI 走子或 POST /mcts/search")]
     MctsTreeMissing,
@@ -28,9 +28,15 @@ pub enum ApiError {
     /// 通用请求错误（参数非法 / 历史不足等）
     #[error("{0}")]
     BadRequest(String),
-    /// 当前轮到人类玩家，不能强制对手走子
-    #[error("当前轮到人类玩家，不能强制对手走子")]
-    NotAiTurn,
+    /// Agent（玩家实体）不存在
+    #[error("Agent 不存在: {0}")]
+    AgentNotFound(String),
+    /// Agent 变体与对局变体不一致（绑定 / dry-run / 单步均要求一致）
+    #[error("Agent 变体（{agent_variant}）与对局变体（{game_variant}）不一致")]
+    AgentVariantMismatch {
+        agent_variant: String,
+        game_variant: String,
+    },
     /// ONNX 模型未加载（与请求变体不匹配或加载失败）
     #[error("ONNX 模型不可用: {0}")]
     ModelUnavailable(String),
@@ -44,12 +50,12 @@ impl ApiError {
         match self {
             ApiError::GameNotFound(_) => StatusCode::NOT_FOUND,
             ApiError::IllegalAction { .. } => StatusCode::BAD_REQUEST,
-            ApiError::GameOver | ApiError::AiDisabled | ApiError::NotAiTurn => {
-                StatusCode::CONFLICT
-            }
+            ApiError::GameOver | ApiError::HumanTurn => StatusCode::CONFLICT,
             ApiError::MctsTreeMissing => StatusCode::NOT_FOUND,
             ApiError::NnueTreeMissing => StatusCode::NOT_FOUND,
             ApiError::BadRequest(_) => StatusCode::BAD_REQUEST,
+            ApiError::AgentNotFound(_) => StatusCode::NOT_FOUND,
+            ApiError::AgentVariantMismatch { .. } => StatusCode::CONFLICT,
             ApiError::ModelUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             ApiError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
@@ -61,11 +67,12 @@ impl ApiError {
             ApiError::GameNotFound(_) => "GAME_NOT_FOUND",
             ApiError::IllegalAction { .. } => "ILLEGAL_ACTION",
             ApiError::GameOver => "GAME_OVER",
-            ApiError::AiDisabled => "AI_DISABLED",
+            ApiError::HumanTurn => "HUMAN_TURN",
             ApiError::MctsTreeMissing => "MCTS_TREE_MISSING",
             ApiError::NnueTreeMissing => "NNUE_TREE_MISSING",
-            ApiError::NotAiTurn => "NOT_AI_TURN",
             ApiError::BadRequest(_) => "BAD_REQUEST",
+            ApiError::AgentNotFound(_) => "AGENT_NOT_FOUND",
+            ApiError::AgentVariantMismatch { .. } => "AGENT_VARIANT_MISMATCH",
             ApiError::ModelUnavailable(_) => "MODEL_UNAVAILABLE",
             ApiError::Internal(_) => "INTERNAL",
         }

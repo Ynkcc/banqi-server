@@ -10,56 +10,139 @@ pub struct CreateGameReq {
     /// 棋盘变体
     #[serde(default)]
     pub variant: Option<String>,
-    /// 对手类型："PvP"（本地双人）/ "Random" / "RevealFirst" / "CaptureFirst" /
-    /// "Engine"（纯计算强引擎）/ "Nnue" / "MctsOnnx"。显式给出时优先生效；
-    /// 缺省时按传统语义回退（aiEnabled=false → PvP，否则由模型文件扩展名决定）。
+    /// 红 / 黑双方选手槽位（None = 双方 Human，原本地双人）
     #[serde(default)]
-    pub opponent: Option<String>,
-    /// 是否启用 AI 对手（仅 `opponent` 缺省时的传统语义；默认 true）
-    #[serde(default)]
-    pub ai_enabled: Option<bool>,
-    /// AI 执子方："red" / "black" / "auto"（默认 "auto" = AI 执黑，人类执红先行）
-    #[serde(default)]
-    pub ai_player: Option<String>,
-    /// MCTS 模拟次数；缺省时跟随服务器当前默认值（此后经 PUT /api/settings
-    /// 调整会实时同步到本对局），显式指定后固定不变
-    #[serde(default)]
-    pub mcts_sims: Option<usize>,
-    /// Expectimax 强引擎节点预算（仅 Engine 对手生效）；缺省时取服务器当前默认值。
-    #[serde(default)]
-    pub engine_budget: Option<u64>,
-    /// NNUE 对手预算模式："nodes"（纯节点预算）/ "depth_nodes"（深度+节点预算，
-    /// 默认）/ "time"（用时）。缺省时取服务器当前默认模式。
-    #[serde(default)]
-    pub nnue_budget_mode: Option<String>,
-    /// NNUE 时间预算毫秒（仅 "time" 模式生效）；缺省时取服务器当前默认值。
-    #[serde(default)]
-    pub nnue_time_ms: Option<u64>,
-    /// 搜索硬超时毫秒（全模式必选生效；超时放弃后续搜索返回实际结果）。
-    /// 缺省时取服务器当前默认值（60s）。
-    #[serde(default)]
-    pub search_timeout_ms: Option<u64>,
-    /// 显式绑定的模型文件（须在模型目录内）。仅模型类对手需要；缺省自动匹配，
-    /// 同变体多候选时报歧义错误。推理后端由扩展名决定（`.nnue` → NNUE，其余 → ONNX）。
-    #[serde(default)]
-    pub model_file: Option<String>,
-    /// NNUE 搜索深度（仅 `.nnue` 模型生效）；缺省时取服务器当前默认值。
-    #[serde(default)]
-    pub nnue_depth: Option<i32>,
-    /// NNUE 节点预算（仅 `.nnue` 模型生效）；缺省时取服务器当前默认值。
-    #[serde(default)]
-    pub nnue_budget: Option<u64>,
+    pub slots: Option<SlotsReq>,
     /// BFEN 局面串：提供时由该局面重建对局（变体以 BFEN 自带标识为准）。
     #[serde(default)]
     pub fen: Option<String>,
 }
 
-/// PUT /api/games/:id/model：为进行中的对局重新绑定模型文件。
+/// POST /api/games 请求中的双方槽位（缺省方 = Human）。
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ModelBindReq {
-    /// 模型文件路径（须为模型目录内已扫描到的 .onnx）
-    pub model_file: String,
+pub struct SlotsReq {
+    #[serde(default)]
+    pub red: Option<SlotReq>,
+    #[serde(default)]
+    pub black: Option<SlotReq>,
+}
+
+/// 单个选手槽位请求：`{ kind, modelFile?, params?, agentId? }`。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SlotReq {
+    /// "Human" / 策略种类（见 `StrategyKind::parse`）/ "Agent"
+    pub kind: String,
+    /// 模型类策略绑定的模型文件（须在模型目录内）；缺省按变体 ID 自动匹配
+    #[serde(default)]
+    pub model_file: Option<String>,
+    /// 引擎参数（缺省字段取服务器当前默认值，建局时快照固定）
+    #[serde(default)]
+    pub params: Option<SlotParamsReq>,
+    /// `kind = "Agent"` 时必填：绑定 Agent 实体（其策略/搜索配置实时生效）
+    #[serde(default)]
+    pub agent_id: Option<String>,
+}
+
+/// 单槽位引擎参数（全字段可选，缺省取服务器当前默认值）。
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SlotParamsReq {
+    /// Gumbel MCTS 模拟次数（Mcts 类策略）
+    #[serde(default)]
+    pub mcts_sims: Option<usize>,
+    /// Expectimax 强引擎节点预算
+    #[serde(default)]
+    pub engine_budget: Option<u64>,
+    /// Expectimax 预算模式："nodes" / "depth_nodes" / "time"
+    #[serde(default)]
+    pub nnue_budget_mode: Option<String>,
+    /// Expectimax 搜索深度（depth_nodes 模式）
+    #[serde(default)]
+    pub nnue_depth: Option<i32>,
+    /// Expectimax 节点预算（nodes / depth_nodes 模式）
+    #[serde(default)]
+    pub nnue_budget: Option<u64>,
+    /// Expectimax 时间预算毫秒（time 模式）
+    #[serde(default)]
+    pub nnue_time_ms: Option<u64>,
+    /// 搜索硬超时毫秒（全模式生效）
+    #[serde(default)]
+    pub search_timeout_ms: Option<u64>,
+}
+
+/// PUT /api/games/:id/slots：对局中切换任一方槽位（只更新给出的方）。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PutSlotsReq {
+    #[serde(default)]
+    pub red: Option<SlotReq>,
+    #[serde(default)]
+    pub black: Option<SlotReq>,
+}
+
+/// POST /api/games/:id/dry-run：为当前行棋方请求策略建议走法（不落子）。
+///
+/// 当前方槽位为策略时忽略请求字段（预览该策略将走的棋）；
+/// 当前方为 Human 时作为提示：`kind` 缺省为 Expectimax，模型类策略
+/// 按变体自动匹配模型。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DryRunReq {
+    /// Human 方提示用的策略种类（缺省 Expectimax；兼容旧名 Engine/Nnue）
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// 提示用策略的模型文件（模型类策略需要；缺省按变体自动匹配）
+    #[serde(default)]
+    pub model_file: Option<String>,
+    /// 指定 Agent：以其当前配置为当前行棋方计算建议（变体须一致），
+    /// 忽略 kind / model_file / 当前方槽位绑定——建议永远作用于当前行动方
+    #[serde(default)]
+    pub agent_id: Option<String>,
+}
+
+/// POST /games/{id}/run 请求体（可空）：单步执行当前行棋方槽位策略一步。
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunReq {
+    /// 指定 Agent：以其当前配置为当前行棋方执行一步（变体须一致），
+    /// 忽略当前方槽位绑定——单步永远作用于当前行动方
+    #[serde(default)]
+    pub agent_id: Option<String>,
+}
+
+/// 创建 Agent 请求：`{ variant, kind, modelFile?, params? }`。
+/// 创建后除搜索参数（params）外只读；模型类策略在创建时预加载校验。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateAgentReq {
+    /// 适用的棋盘变体 ID（参与对局时变体须一致）
+    pub variant: String,
+    /// 策略种类（见 `StrategyKind::parse`；不接受 "Human" / "Agent"）
+    pub kind: String,
+    /// 模型类策略绑定的模型文件；缺省按变体 ID 自动匹配
+    #[serde(default)]
+    pub model_file: Option<String>,
+    /// 搜索参数（缺省字段取服务器当前默认值；可实时调整）
+    #[serde(default)]
+    pub params: Option<SlotParamsReq>,
+}
+
+/// Agent 视图（创建后只读；搜索参数随 `PUT /api/agents/{id}/settings` 实时变化）。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentResp {
+    pub id: String,
+    /// 适用的棋盘变体 ID
+    pub variant: String,
+    #[serde(flatten)]
+    pub slot: SlotView,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AgentsListResp {
+    pub agents: Vec<AgentResp>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -150,38 +233,92 @@ pub struct ActionView {
     pub is_chance: bool,
 }
 
+/// 单个选手槽位视图（对局状态 / 摘要下发）。
 #[derive(Debug, Serialize)]
-pub struct AiInfoView {
-    pub enabled: bool,
-    /// 对手种类："PvP" / "Random" / "RevealFirst" / "CaptureFirst" / "Engine" /
-    /// "Nnue" / "MctsOnnx"（与前端 Opponent 枚举一致；PvP 时 enabled=false）
+pub struct SlotView {
+    /// "Human" / 策略种类 / "Agent"（与前端契约一致）
     pub kind: String,
-    /// 对手执子方："red" / "black"（未启用时为 null）
+    /// Agent 槽位绑定的 Agent ID（其余为 None；实际策略由 Agent 实时持有）
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub player: Option<String>,
-    /// 推理后端："mcts-onnx" / "nnue"（仅模型类对手给出）
+    pub agent_id: Option<String>,
+    /// 模型类策略绑定的模型文件
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub engine: Option<String>,
-    /// MCTS 模拟次数（MctsOnnx 后端）
-    pub mcts_sims: usize,
-    /// Expectimax 强引擎节点预算（Engine 对手）
+    pub model_file: Option<String>,
+    /// Gumbel MCTS 模拟次数（Mcts 类策略）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mcts_sims: Option<usize>,
+    /// Expectimax 强引擎节点预算
     #[serde(skip_serializing_if = "Option::is_none")]
     pub engine_budget: Option<u64>,
-    /// NNUE 预算模式："nodes" / "depth_nodes" / "time"（Nnue 后端）
+    /// Expectimax 预算模式："nodes" / "depth_nodes" / "time"
     #[serde(skip_serializing_if = "Option::is_none")]
     pub budget_mode: Option<String>,
-    /// NNUE 搜索深度（Nnue 后端，depth_nodes 模式）
+    /// Expectimax 搜索深度（depth_nodes 模式）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nnue_depth: Option<i32>,
-    /// NNUE 节点预算（Nnue 后端，nodes/depth_nodes 模式）
+    /// Expectimax 节点预算（nodes / depth_nodes 模式）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nnue_budget: Option<u64>,
-    /// NNUE 时间预算毫秒（Nnue 后端，time 模式）
+    /// Expectimax 时间预算毫秒（time 模式）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nnue_time_ms: Option<u64>,
-    /// 搜索硬超时毫秒（Nnue 后端，全模式生效）
+    /// 搜索硬超时毫秒（全模式生效）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub search_timeout_ms: Option<u64>,
+}
+
+impl SlotView {
+    pub fn human() -> Self {
+        Self {
+            kind: "Human".to_string(),
+            agent_id: None,
+            model_file: None,
+            mcts_sims: None,
+            engine_budget: None,
+            budget_mode: None,
+            nnue_depth: None,
+            nnue_budget: None,
+            nnue_time_ms: None,
+            search_timeout_ms: None,
+        }
+    }
+}
+
+/// 红 / 黑双方槽位视图。
+#[derive(Debug, Serialize)]
+pub struct SlotsView {
+    pub red: SlotView,
+    pub black: SlotView,
+}
+
+/// POST /api/games/:id/dry-run 响应：当前行棋方策略的建议走法（不落子）。
+#[derive(Debug, Serialize)]
+pub struct SuggestionResp {
+    /// 建议产生时的对局版本号（前端据此丢弃过期建议）
+    pub version: u64,
+    /// 行棋方："red" / "black"
+    pub player: String,
+    /// 动作空间索引
+    pub action: usize,
+    /// 源格索引（翻棋时 == to）
+    pub from: usize,
+    /// 目标格索引
+    pub to: usize,
+    /// 是否机会动作（翻棋 / 吃暗子）
+    pub is_chance: bool,
+    /// 是否纯翻棋
+    pub is_flip: bool,
+    /// 是否吃子（吃明子；吃暗子为机会动作）
+    pub is_capture: bool,
+    /// 根评估值（行棋方视角；不可用时为 null）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub score: Option<f32>,
+    /// MCTS 类策略的搜索统计
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mcts_stats: Option<MctsStatsDto>,
+    /// ExpectimaxNnue 策略的搜索统计
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nnue_stats: Option<NnueStatsDto>,
 }
 
 /// GET /api/games/:id 响应：前端 `GameState`（types.ts）为基座的完整状态
@@ -213,9 +350,10 @@ pub struct GameStateResp {
     /// 决策历史（棋谱）：每手棋的实际执行结果，含翻棋/吃暗子翻出的真实棋子。
     /// 悔棋后同步截断；重开对局清空。
     pub history: Vec<HistoryMoveView>,
-    pub ai: AiInfoView,
-    /// 当前是否轮到 AI 行棋
-    pub ai_to_move: bool,
+    /// 红 / 黑双方选手槽位（Human 或策略配置）
+    pub slots: SlotsView,
+    /// 当前行棋方是否为策略（true 时可 POST /run 单步执行或纳入 auto 循环）
+    pub can_run: bool,
     /// 当前是否可悔棋（当前行棋方存在更早的行动快照且对局未结束）
     pub can_undo: bool,
 }
@@ -357,7 +495,8 @@ pub struct GameSummary {
     pub over: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub winner: Option<String>,
-    pub ai: AiInfoView,
+    /// 红 / 黑双方槽位（kind 摘要）
+    pub slots: SlotsView,
 }
 
 #[derive(Debug, Serialize)]
@@ -408,8 +547,8 @@ pub struct SettingsResp {
     pub search_timeout_ms: u64,
 }
 
-impl From<crate::app::opponent::EngineParams> for SettingsResp {
-    fn from(p: crate::app::opponent::EngineParams) -> Self {
+impl From<crate::app::player::EngineParams> for SettingsResp {
+    fn from(p: crate::app::player::EngineParams) -> Self {
         Self {
             mcts_sims: p.mcts_sims,
             engine_budget: p.engine_budget,
@@ -494,13 +633,6 @@ pub struct ModelEntryDto {
     pub name: String,
     /// 完整路径（创建对局 / 绑定模型时作为 modelFile 使用）
     pub path: String,
-}
-
-/// GET /api/games/:id/opponent 响应：当前对局的对手种类
-/// （"PvP" = 本地双人；其余取值见 `OpponentKind::as_str`）。
-#[derive(Debug, Serialize)]
-pub struct OpponentResp {
-    pub opponent: String,
 }
 
 /// GET /api/games/:id/move-action 响应：坐标对 → 动作空间索引

@@ -141,7 +141,7 @@ where
 {
     let reused = reuse.is_some();
     let budget = config.num_simulations.max(1);
-    let mut mcts = match reuse {
+    let mcts = match reuse {
         Some(p) => {
             let mut m = GumbelMCTS::from_arena(env, evaluator, config, p.arena, p.root_idx);
             m.step_next(&p.ai_env, p.ai_action);
@@ -150,6 +150,38 @@ where
         }
         None => GumbelMCTS::new(env, evaluator, config),
     };
+    finish_gumbel(mcts, reused, budget)
+}
+
+/// 直接续用「树根与当前局面一致」的搜索树（不推进根，保留全部已积累统计）。
+///
+/// 典型场景：dry-run 搜索后不落子、紧接 run——两棵树根完全相同，
+/// 无需 `tree_reuse_plan` 的两步推进，直接续用即可。
+pub fn run_gumbel_reuse_root<G, E>(
+    env: &G,
+    evaluator: &E,
+    config: GumbelConfig,
+    prev: MctsTree<G>,
+) -> Result<MctsTree<G>, String>
+where
+    G: GameEnv + Copy,
+    E: Evaluator<G>,
+{
+    let budget = config.num_simulations.max(1);
+    let mcts = GumbelMCTS::from_arena(env, evaluator, config, prev.arena, prev.root_idx);
+    finish_gumbel(mcts, true, budget)
+}
+
+/// run 收尾公共段：执行搜索 + 组装统计（`run_gumbel` / `run_gumbel_reuse_root` 共用）。
+fn finish_gumbel<G, E>(
+    mut mcts: GumbelMCTS<'_, G, E>,
+    reused: bool,
+    budget: usize,
+) -> Result<MctsTree<G>, String>
+where
+    G: GameEnv + Copy,
+    E: Evaluator<G>,
+{
     let pre_visits = mcts.arena.get(mcts.root_idx).visit_count;
     let started = Instant::now();
     let result = mcts
@@ -171,6 +203,38 @@ where
             elapsed_ms,
         },
     })
+}
+
+/// 上一棵树的根局面是否与当前环境一致（根直接续用判定）。
+fn same_root<G: GameEnv + Copy>(prev: &MctsTree<G>, env: &G) -> bool {
+    prev.arena
+        .get(prev.root_idx)
+        .env
+        .map(|e| env_state_eq(&e, env))
+        .unwrap_or(false)
+}
+
+/// MCTS 搜索的复用路径分派：树根与当前局面一致 → 直接续用；
+/// 否则沿「策略上手 → 对手上手」尝试两步推进；均对不上 → 全新建树。
+fn mcts_reuse<G>(env: &G, prev: Option<MctsTree<G>>) -> MctsReuse<G>
+where
+    G: GameEnv + Copy + SnapshotEnv,
+{
+    match prev {
+        Some(t) if same_root(&t, env) => MctsReuse::SameRoot(t),
+        Some(t) => MctsReuse::Advance(tree_reuse_plan(t, env)),
+        None => MctsReuse::None,
+    }
+}
+
+/// [`mcts_reuse`] 的分派结果。
+enum MctsReuse<G: GameEnv + Copy> {
+    /// 树根与当前局面一致：直接续用（`run_gumbel_reuse_root`）
+    SameRoot(MctsTree<G>),
+    /// 可按计划推进根（对不上为 None，回退全新建树）
+    Advance(Option<ReusePlan<G>>),
+    /// 无上一棵树：全新建树
+    None,
 }
 
 /// 比较两个局面是否一致（按 ResNet 观测特征逐位比较）。
@@ -229,7 +293,8 @@ where
     None
 }
 
-/// Gumbel MCTS + TorchScript（需 torch feature）：含树复用。
+/// Gumbel MCTS + TorchScript（需 torch feature）：含树复用（根一致直接续用 /
+/// 两步推进 / 全新建树，见 [`mcts_reuse`]）。
 /// 泛型支持全部变体环境（调用方经 `with_env!` 以具体环境类型实例化）。
 #[cfg(feature = "torch")]
 pub fn mcts_search_torch<G>(
@@ -242,12 +307,16 @@ where
     G: GameEnv + Copy + SnapshotEnv + 'static,
 {
     let model = model.ok_or("未加载 .pt 模型，无法执行 MCTS+DL 搜索")?;
-    let reuse = prev_tree.and_then(|t| tree_reuse_plan(t, env));
     let evaluator = banqi_engine::engine::TchEvaluator::<G>::new(model);
-    run_gumbel(env, &evaluator, GumbelConfig::for_play(sims), reuse)
+    match mcts_reuse(env, prev_tree) {
+        MctsReuse::SameRoot(t) => run_gumbel_reuse_root(env, &evaluator, GumbelConfig::for_play(sims), t),
+        MctsReuse::Advance(reuse) => run_gumbel(env, &evaluator, GumbelConfig::for_play(sims), reuse),
+        MctsReuse::None => run_gumbel(env, &evaluator, GumbelConfig::for_play(sims), None),
+    }
 }
 
-/// Gumbel MCTS + ONNX（需 onnx feature）：含树复用。
+/// Gumbel MCTS + ONNX（需 onnx feature）：含树复用（根一致直接续用 /
+/// 两步推进 / 全新建树，见 [`mcts_reuse`]）。
 /// 泛型支持全部变体环境（调用方经 `with_env!` 以具体环境类型实例化）。
 #[cfg(feature = "onnx")]
 pub fn mcts_search_onnx<G>(
@@ -260,9 +329,12 @@ where
     G: GameEnv + Copy + SnapshotEnv + 'static,
 {
     let model = model.ok_or("未加载 .onnx 模型，无法执行 MCTS+ONNX 搜索")?;
-    let reuse = prev_tree.and_then(|t| tree_reuse_plan(t, env));
     let evaluator = banqi_engine::inference::onnx::OnnxEvaluator::<G>::new(model);
-    run_gumbel(env, &evaluator, GumbelConfig::for_play(sims), reuse)
+    match mcts_reuse(env, prev_tree) {
+        MctsReuse::SameRoot(t) => run_gumbel_reuse_root(env, &evaluator, GumbelConfig::for_play(sims), t),
+        MctsReuse::Advance(reuse) => run_gumbel(env, &evaluator, GumbelConfig::for_play(sims), reuse),
+        MctsReuse::None => run_gumbel(env, &evaluator, GumbelConfig::for_play(sims), None),
+    }
 }
 
 /// 一次 Expectimax（NNUE / 规则叶评估）搜索的统计（不含后端标识；DTO 由调用方组装）。

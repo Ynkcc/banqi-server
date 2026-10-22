@@ -1,24 +1,27 @@
-//! 无状态引擎端点：BFEN 局面 → 引擎最优动作（MCTS+ONNX 或 Expectimax+NNUE）。
+//! 无状态引擎端点：BFEN 局面 → 引擎最优动作（MCTS+ONNX / MCTS+DL / Expectimax+NNUE）。
 //!
 //! 与对局 API 的差异：无会话、无版本号、不落子——连线程序自行持有局面，
 //! 每次把 BFEN 发来询问着法即可，服务端不保存任何对局状态（重启无影响）。
-//! 推理后端由模型文件扩展名决定：`.onnx` → MCTS+ONNX（走 blocking 线程池，
-//! NN 推理结果经模型实例上的 nncache 复用）；`.nnue` → Expectimax+NNUE。
+//! 推理后端由模型文件扩展名决定：`.onnx` → MCTS+ONNX、`.pt` → MCTS+DL、
+//! `.nnue` → Expectimax+NNUE；决策分派收敛于 `app::player::decide`（单一真源）。
+
+use std::sync::Arc;
 
 use axum::extract::State;
 use axum::Json;
 
 use banqi_core::core::env::PositionSnapshot;
 
-use crate::ai::{choose_mcts_by_engine, choose_nnue_blocking};
-use crate::dto::{EngineMoveReq, EngineMoveResp, MctsStatsDto};
+use crate::app::models::EngineKind;
+use crate::app::player::{self, EngineParams, PlayerSlot, StrategyKind};
+use crate::dto::{EngineMoveReq, EngineMoveResp};
 use crate::error::ApiError;
-use crate::state::{EngineKind, GameSession, SharedState};
+use crate::state::{GameSession, SharedState};
 
 /// POST /api/engine/move
 ///
 /// 请求：`{ fen, mctsSims?, nnueDepth?, nnueBudget?, modelFile? }`；
-/// 响应：`{ variant, currentPlayer, action, from, to, isChance, mctsStats?, nnueStats? }`。
+/// 响应：`{ variant, currentPlayer, action, from, to, isChance, isFlip, mctsStats?, nnueStats? }`。
 /// 输入局面已终局时返回 409（GAME_OVER）。
 pub async fn engine_move(
     State(app): State<SharedState>,
@@ -34,21 +37,17 @@ pub async fn engine_move(
     let current_player = crate::dto::player_str(snap.current_player);
 
     // 终局预检：终局局面无着法可问（借用 GameSession 复用终局判定与动作视图逻辑）
-    let session = GameSession::from_snapshot(variant, snap.clone(), None, None);
+    let session = GameSession::from_snapshot(variant, snap.clone(), crate::app::player::Slots::all_human());
     let (terminated, truncated, _) = session.over_state();
     if terminated || truncated {
         return Err(ApiError::GameOver);
     }
 
     let model_file = app.resolve_model_file(req.model_file.as_deref(), variant)?;
-    let engine = EngineKind::from_model_file(&model_file);
-    let view_of = |action: usize| session.action_view(action);
-    let is_flip = |action: usize| action < variant.config().reveal_actions_count;
-
-    // 搜索执行：Nnue 走 Expectimax（本地），MCTS 类后端经
-    // choose_mcts_by_engine 单点调度（feature 门控与报错收敛于此）
-    let (action, mcts_stats, nnue_stats) = match engine {
-        EngineKind::Nnue => {
+    // 推理后端按模型扩展名分派（单一真源：EngineKind）
+    let kind = StrategyKind::from_engine_kind(EngineKind::from_model_file(&model_file));
+    let slot = match kind {
+        StrategyKind::ExpectimaxNnue => {
             let budget = app.build_search_budget(
                 req.nnue_budget_mode.as_deref(),
                 req.nnue_budget,
@@ -56,31 +55,39 @@ pub async fn engine_move(
                 req.nnue_time_ms,
                 req.search_timeout_ms,
             )?;
-            let evaluator = app
-                .acquire_nnue_model(model_file)
-                .await
-                .map_err(ApiError::ModelUnavailable)?;
-            let (action, stats, _tree) = choose_nnue_blocking(snap, evaluator, budget)
-                .await
-                .map_err(ApiError::Internal)?;
-            (action, None, Some(stats))
+            PlayerSlot::strategy(
+                kind,
+                Some(model_file),
+                EngineParams {
+                    nnue_budget: budget,
+                    ..app.params()
+                },
+            )
         }
-        EngineKind::MctsOnnx | EngineKind::MctsDL => {
-            let sims = req.mcts_sims.unwrap_or_else(|| app.default_sims()).max(1);
-            // 锁外推理（无会话状态，无版本号校验需求；无上一棵树可复用）
-            let (action, tree) =
-                choose_mcts_by_engine(&app, model_file, snap, sims, None).await?;
-            let mcts_stats = MctsStatsDto::from_session(Some(&tree))
-                .ok_or_else(|| ApiError::Internal("搜索树缺少统计信息".into()))?;
-            (action, Some(mcts_stats), None)
-        }
+        _ => PlayerSlot::strategy(
+            kind,
+            Some(model_file),
+            EngineParams {
+                mcts_sims: req.mcts_sims.unwrap_or_else(|| app.default_sims()).max(1),
+                ..app.params()
+            },
+        ),
     };
 
-    let view = view_of(action);
+    // 锁外搜索（blocking 线程池；无会话状态，无版本号校验需求，无上一棵树可复用）
+    let app2 = Arc::clone(&app);
+    let decision = tokio::task::spawn_blocking(move || player::decide(&snap, &slot, None, &app2.models))
+        .await
+        .map_err(|e| ApiError::Internal(format!("blocking 任务 join 失败: {e}")))?
+        .map_err(ApiError::Internal)?;
+
+    let view = session.action_view(decision.action);
+    let is_flip = decision.action < variant.config().reveal_actions_count;
     tracing::info!(
         variant = variant.as_str(),
-        engine = ?engine,
-        "engine/move: action={action}（from={} to={}，chance={}）",
+        kind = kind.as_str(),
+        "engine/move: action={}（from={} to={}，chance={}）",
+        decision.action,
         view.from,
         view.to,
         view.is_chance
@@ -89,12 +96,12 @@ pub async fn engine_move(
     Ok(Json(EngineMoveResp {
         variant: variant.as_str().to_string(),
         current_player,
-        action,
+        action: decision.action,
         from: view.from,
         to: view.to,
         is_chance: view.is_chance,
-        is_flip: is_flip(action),
-        mcts_stats,
-        nnue_stats,
+        is_flip,
+        mcts_stats: decision.mcts_stats,
+        nnue_stats: decision.nnue_stats,
     }))
 }

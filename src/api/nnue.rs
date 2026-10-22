@@ -103,16 +103,22 @@ pub async fn search(
         let s = games
             .get(&game_id)
             .ok_or_else(|| ApiError::GameNotFound(id.clone()))?;
-        let budget = s
-            .opponent
-            .map(|o| o.search_budget)
-            .unwrap_or_else(|| app.default_nnue_budget());
-        let model_file = s.model_file.clone().ok_or_else(|| {
-            ApiError::BadRequest(
-                "对局未绑定模型文件，无法执行 Expectimax 搜索（创建对局时指定 modelFile 或 PUT /api/games/:id/model 绑定 .nnue）"
-                    .into(),
-            )
-        })?;
+        // 预算取当前行棋方 ExpectimaxNnue 策略槽位的参数（其余取服务器默认值）
+        let budget = match s.slots.side(s.core.current.current_player) {
+            crate::app::player::PlayerSlot::Strategy {
+                kind: crate::app::player::StrategyKind::ExpectimaxNnue,
+                params,
+                ..
+            } => params.nnue_budget,
+            _ => app.default_nnue_budget(),
+        };
+        // 模型取当前行棋方策略槽位绑定的模型（无则按变体自动匹配）
+        let model_file = match s.slots.side(s.core.current.current_player) {
+            crate::app::player::PlayerSlot::Strategy {
+                model_file: Some(f), ..
+            } => f.clone(),
+            _ => app.resolve_model_file(None, s.core.variant)?,
+        };
         (s.core.variant, s.core.current.clone(), budget, model_file)
     };
 

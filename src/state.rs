@@ -10,16 +10,15 @@ use std::sync::{RwLock, Arc};
 
 use uuid::Uuid;
 
-use crate::app::opponent::{EngineParams, OpponentKind};
+use crate::app::player::{Agent, EngineParams, PlayerSlot, Slots};
 use crate::app::search::{BudgetMode, SearchBudget};
 use crate::app::session::SnapshotSession;
 use crate::app::sync::{read_lock, write_lock};
-use banqi_core::core::env::types::Player;
 use banqi_core::core::env::{PositionSnapshot, Variant};
 use banqi_engine::nnue::NnueEvaluator;
 
 use crate::config::ServerConfig;
-use crate::dto::{player_str, winner_str, ActionView, AiInfoView, GameStateResp, HistoryMoveView};
+use crate::dto::{winner_str, ActionView, GameStateResp, HistoryMoveView, SlotView, SlotsView};
 use crate::error::ApiError;
 use crate::variant;
 
@@ -39,67 +38,34 @@ pub type Models = crate::app::models::ModelPool;
 
 // 对局会话
 
-/// 对手配置（PvP 时 `GameSession.opponent` 为 None）。
-#[derive(Clone, Copy, Debug)]
-pub struct OpponentConfig {
-    /// 对手执子方
-    pub player: Player,
-    /// 对手种类（规则 / Engine / Nnue / MctsOnnx；模型类对手须绑定模型文件）
-    pub kind: OpponentKind,
-    /// MCTS 模拟次数（MctsOnnx 后端；创建对局时快照固定，
-    /// 未显式指定时取服务器当前默认值）
-    pub mcts_sims: usize,
-    /// Expectimax 强引擎节点预算（Engine 对手；创建对局时快照固定，
-    /// 未显式指定时取服务器当前默认值）
-    pub engine_budget: u64,
-    /// Expectimax 搜索预算（Engine：节点预算 + 硬超时；Nnue：模式 +
-    /// 节点/深度/时间 + 硬超时。创建对局时快照固定，未显式指定字段
-    /// 取服务器当前默认值）
-    pub search_budget: SearchBudget,
-}
-
-/// 单局状态：快照式会话核心 + 对手配置 + 绑定模型 + 搜索树。
+/// 单局状态：快照式会话核心 + 红/黑选手槽位 + 搜索树。
 pub struct GameSession {
     /// 对局核心（变体/当前快照/悔棋历史/版本号；走子不变量在 banqi-app 单点维护）
     pub core: SnapshotSession,
-    /// 对手配置（None = 本地双人 PvP）
-    pub opponent: Option<OpponentConfig>,
-    /// 与对局绑定的模型文件（仅模型类对手需要；手动搜索亦使用该文件，
-    /// 随用随加载，常驻缓存）。
-    pub model_file: Option<String>,
-    /// 最近一次 MCTS 搜索保留的树（对手回合或手动搜索时替换；仅查询用）
+    /// 红 / 黑双方选手槽位（Human 或策略托管；双方 Human 即原本地双人）
+    pub slots: Slots,
+    /// 最近一次 MCTS 搜索保留的树（策略回合或手动搜索时替换；仅查询用）
     pub mcts_tree: Option<crate::mcts::MctsTreeBox>,
-    /// 最近一次 Expectimax+NNUE 搜索保留的轨迹树（NNUE 对手回合或手动搜索时
-    /// 替换；仅查询用，不做跨回合复用）
+    /// 最近一次 Expectimax+NNUE 搜索保留的轨迹树（ExpectimaxNnue 策略回合或
+    /// 手动搜索时替换；仅查询用，不做跨回合复用）
     pub expectimax_tree: Option<crate::app::expectimax_view::ExpectimaxTree>,
 }
 
 impl GameSession {
-    pub fn new(
-        variant: Variant,
-        opponent: Option<OpponentConfig>,
-        model_file: Option<String>,
-    ) -> Self {
+    pub fn new(variant: Variant, slots: Slots) -> Self {
         Self {
             core: SnapshotSession::new(variant),
-            opponent,
-            model_file,
+            slots,
             mcts_tree: None,
             expectimax_tree: None,
         }
     }
 
     /// 由既有快照构建会话（BFEN 粘贴重建等场景；走子历史从空开始）。
-    pub fn from_snapshot(
-        variant: Variant,
-        snapshot: PositionSnapshot,
-        opponent: Option<OpponentConfig>,
-        model_file: Option<String>,
-    ) -> Self {
+    pub fn from_snapshot(variant: Variant, snapshot: PositionSnapshot, slots: Slots) -> Self {
         Self {
             core: SnapshotSession::from_snapshot(variant, snapshot),
-            opponent,
-            model_file,
+            slots,
             mcts_tree: None,
             expectimax_tree: None,
         }
@@ -146,15 +112,12 @@ impl GameSession {
         }
     }
 
-    /// 当前是否轮到对手行棋（PvP 恒 false）。
-    pub fn opponent_to_move(&self) -> bool {
-        match self.opponent {
-            Some(opp) => {
-                let (terminated, truncated, _) = self.over_state();
-                !terminated && !truncated && self.core.current.current_player == opp.player
-            }
-            None => false,
-        }
+    /// 当前是否轮到策略行棋（Human 槽位恒 false；对局结束恒 false）。
+    pub fn strategy_to_move(&self) -> bool {
+        let (terminated, truncated, _) = self.over_state();
+        !terminated
+            && !truncated
+            && !self.slots.side(self.core.current.current_player).is_human()
     }
 
     /// 当前是否可悔棋：对局未结束，且历史中存在「当前行棋方上次行动前」的快照
@@ -176,6 +139,10 @@ impl GameSession {
     /// 当前完整状态视图：前端 `GameState` 契约视图（`game_state_view`，单一真源）
     /// + server 专属扩展字段。
     pub fn view(&self, game_id: Uuid) -> GameStateResp {
+        let slots_view = SlotsView {
+            red: slot_view(&self.slots.red),
+            black: slot_view(&self.slots.black),
+        };
         let v = crate::app::view::game_view(&self.core);
         let s = &v.scalars;
         let over = s.terminated || s.truncated;
@@ -190,48 +157,6 @@ impl GameSession {
                 is_chance: a.is_chance,
             })
             .collect();
-
-        let ai_view = match self.opponent {
-            Some(opp) => AiInfoView {
-                enabled: true,
-                kind: opp.kind.as_str().to_string(),
-                player: Some(player_str(opp.player)),
-                engine: match opp.kind {
-                    OpponentKind::Nnue => Some("nnue".to_string()),
-                    OpponentKind::MctsOnnx => Some("mcts-onnx".to_string()),
-                    OpponentKind::MctsDL => Some("mcts-dl".to_string()),
-                    _ => None,
-                },
-                mcts_sims: opp.mcts_sims,
-                engine_budget: (opp.kind == OpponentKind::Engine).then_some(opp.engine_budget),
-                budget_mode: (opp.kind == OpponentKind::Nnue)
-                    .then(|| opp.search_budget.mode.as_str().to_string()),
-                nnue_depth: (opp.kind == OpponentKind::Nnue
-                    && opp.search_budget.mode == BudgetMode::DepthNodes)
-                    .then_some(opp.search_budget.depth),
-                nnue_budget: (opp.kind == OpponentKind::Nnue
-                    && opp.search_budget.mode != BudgetMode::Time)
-                    .then_some(opp.search_budget.nodes),
-                nnue_time_ms: (opp.kind == OpponentKind::Nnue
-                    && opp.search_budget.mode == BudgetMode::Time)
-                    .then_some(opp.search_budget.time_ms),
-                search_timeout_ms: (opp.kind == OpponentKind::Nnue)
-                    .then_some(opp.search_budget.timeout_ms),
-            },
-            None => AiInfoView {
-                enabled: false,
-                kind: "PvP".to_string(),
-                player: None,
-                engine: None,
-                mcts_sims: 0,
-                engine_budget: None,
-                budget_mode: None,
-                nnue_depth: None,
-                nnue_budget: None,
-                nnue_time_ms: None,
-                search_timeout_ms: None,
-            },
-        };
 
         // 决策历史（棋谱；棋子为前端短码 "R_Sol" 等）
         let history: Vec<HistoryMoveView> = v
@@ -264,8 +189,8 @@ impl GameSession {
             last_action: s.last_action,
             legal_actions,
             history,
-            ai: ai_view,
-            ai_to_move: self.opponent_to_move(),
+            slots: slots_view,
+            can_run: self.strategy_to_move(),
             can_undo: self.undoable(),
         }
     }
@@ -282,7 +207,61 @@ impl GameSession {
             total_steps: v.game.total_step_counter as usize,
             over: v.over,
             winner: winner_str(winner),
-            ai: v.ai,
+            slots: v.slots,
+        }
+    }
+}
+
+/// 单个选手槽位的状态视图（Human 只下发 kind；策略槽位附参数摘要；
+/// Agent 槽位下发 agent_id，实际策略由 Agent 实时持有）。
+fn slot_view(slot: &PlayerSlot) -> SlotView {
+    match slot {
+        PlayerSlot::Human => SlotView::human(),
+        PlayerSlot::Agent(id) => SlotView {
+            kind: "Agent".to_string(),
+            agent_id: Some(id.to_string()),
+            ..SlotView::human()
+        },
+        PlayerSlot::Strategy {
+            kind,
+            model_file,
+            params,
+        } => {
+            let b = &params.nnue_budget;
+            let (budget_mode, nnue_depth, nnue_budget, nnue_time_ms, search_timeout_ms) =
+                match kind {
+                    crate::app::player::StrategyKind::ExpectimaxNnue => (
+                        Some(b.mode.as_str().to_string()),
+                        (b.mode == BudgetMode::DepthNodes).then_some(b.depth),
+                        (b.mode != BudgetMode::Time).then_some(b.nodes),
+                        (b.mode == BudgetMode::Time).then_some(b.time_ms),
+                        Some(b.timeout_ms),
+                    ),
+                    crate::app::player::StrategyKind::Expectimax => (
+                        None,
+                        None,
+                        None,
+                        None,
+                        Some(b.timeout_ms),
+                    ),
+                    _ => (None, None, None, None, None),
+                };
+            SlotView {
+                kind: kind.as_str().to_string(),
+                agent_id: None,
+                model_file: model_file.clone(),
+                mcts_sims: kind.is_mcts().then_some(params.mcts_sims),
+                engine_budget: (matches!(
+                    kind,
+                    crate::app::player::StrategyKind::Expectimax
+                ))
+                .then_some(params.engine_budget),
+                budget_mode,
+                nnue_depth,
+                nnue_budget,
+                nnue_time_ms,
+                search_timeout_ms,
+            }
         }
     }
 }
@@ -300,6 +279,9 @@ pub struct AppState {
     pub models: Models,
     /// 对局存储（std RwLock 即可：所有持锁段均为同步 CPU 操作，不跨 await）
     pub games: RwLock<HashMap<Uuid, GameSession>>,
+    /// Agent（玩家实体）注册表：变体 + 策略种类 + 模型 + 可实时调整的搜索参数。
+    /// 绑定它的对局决策时实时读取（搜索配置调整立即生效）。
+    pub agents: RwLock<HashMap<Uuid, Agent>>,
 }
 
 /// 路由层共享的 `Arc<AppState>` 别名（统一在此定义，避免各 handler 重复声明）。
@@ -359,6 +341,7 @@ impl AppState {
             config,
             models,
             games: RwLock::new(HashMap::new()),
+            agents: RwLock::new(HashMap::new()),
         }
     }
 
@@ -370,11 +353,6 @@ impl AppState {
     /// 当前默认 MCTS 搜索预算。
     pub fn default_sims(&self) -> usize {
         self.params().mcts_sims
-    }
-
-    /// 当前默认 Expectimax 强引擎节点预算。
-    pub fn default_engine_budget(&self) -> u64 {
-        self.params().engine_budget
     }
 
     /// 当前默认 NNUE 搜索预算（含模式与硬超时）。
@@ -421,6 +399,77 @@ impl AppState {
         let mut p = write_lock(&self.params);
         *p = p.updated(mcts_sims, engine_budget, nnue_budget);
         *p
+    }
+
+    /// 注册 Agent（模型类策略已由调用方预加载校验后才调用）。
+    pub fn register_agent(&self, agent: Agent) -> Agent {
+        write_lock(&self.agents).insert(agent.id, agent.clone());
+        agent
+    }
+
+    /// 读取 Agent（不存在时 404）。
+    pub fn get_agent(&self, id: Uuid) -> Result<Agent, ApiError> {
+        read_lock(&self.agents)
+            .get(&id)
+            .cloned()
+            .ok_or(ApiError::AgentNotFound(id.to_string()))
+    }
+
+    /// 读取 Agent 并校验变体一致（绑定槽位 / dry-run / 单步共用）。
+    pub fn get_agent_for_variant(&self, id: Uuid, variant: Variant) -> Result<Agent, ApiError> {
+        let agent = self.get_agent(id)?;
+        if agent.variant != variant {
+            return Err(ApiError::AgentVariantMismatch {
+                agent_variant: agent.variant.as_str().to_string(),
+                game_variant: variant.as_str().to_string(),
+            });
+        }
+        Ok(agent)
+    }
+
+    /// 删除 Agent。
+    pub fn remove_agent(&self, id: Uuid) -> Result<Agent, ApiError> {
+        write_lock(&self.agents)
+            .remove(&id)
+            .ok_or(ApiError::AgentNotFound(id.to_string()))
+    }
+
+    /// 实时解析 Agent 槽位为策略槽位（决策时调用；搜索配置取 Agent 当前值）。
+    pub fn resolve_agent_slot(
+        &self,
+        id: Uuid,
+        variant: Variant,
+    ) -> Result<PlayerSlot, ApiError> {
+        let agent = self.get_agent_for_variant(id, variant)?;
+        Ok(PlayerSlot::Strategy {
+            kind: agent.kind,
+            model_file: agent.model_file,
+            params: agent.params,
+        })
+    }
+
+    /// 由请求可空槽位参数 + 服务器默认值构建引擎参数快照
+    /// （建局 / 改槽位 / 建 Agent / Agent 设置共用）。
+    pub fn slot_params(
+        &self,
+        params: Option<&crate::dto::SlotParamsReq>,
+    ) -> Result<EngineParams, ApiError> {
+        let d = self.params();
+        let Some(p) = params else {
+            return Ok(d);
+        };
+        let nnue_budget = self.build_search_budget(
+            p.nnue_budget_mode.as_deref(),
+            p.nnue_budget,
+            p.nnue_depth,
+            p.nnue_time_ms,
+            p.search_timeout_ms,
+        )?;
+        Ok(EngineParams {
+            mcts_sims: p.mcts_sims.unwrap_or(d.mcts_sims).max(1),
+            engine_budget: p.engine_budget.unwrap_or(d.engine_budget).max(1),
+            nnue_budget,
+        })
     }
 
     /// 创建对局的默认变体：--default-variant > 首个变体。
@@ -518,9 +567,9 @@ impl AppState {
         .map_err(|e| format!("模型加载任务失败: {e}"))?
     }
 
-    /// 按推理后端预加载并校验模型（建局 / 换绑共用的单一真源：原
-    /// `build_opponent` 与 `bind_model` 两处按后端 cfg 门控的「加载 +
-    /// NNUE 布局校验」序列收敛于此）。坏文件 / 跨变体权重在此报错而非对局中途。
+    /// 按推理后端预加载并校验模型（建局 / 对局中改槽位共用的单一真源：
+    /// 按后端 cfg 门控的「加载 + NNUE 布局校验」序列收敛于此）。
+    /// 坏文件 / 跨变体权重在此报错而非对局中途。
     pub async fn preload_engine_model(
         self: &Arc<Self>,
         engine: EngineKind,
@@ -615,7 +664,7 @@ mod tests {
 
     #[test]
     fn session_delegates_apply_and_undo() {
-        let mut s = GameSession::new(Variant::DarkChess4x8, None, None);
+        let mut s = GameSession::new(Variant::DarkChess4x8, Slots::all_human());
         assert!(!s.undoable());
         // 非法动作：合法集合之外必存在
         let illegal = (0..).find(|&a| !s.legal_actions().contains(&a)).expect("总有非法动作");
@@ -647,7 +696,7 @@ mod tests {
     fn read_write_lock_recovery_helpers() {
         let games: RwLock<HashMap<Uuid, GameSession>> = RwLock::new(HashMap::new());
         assert!(read_lock(&games).is_empty());
-        write_lock(&games).insert(Uuid::new_v4(), GameSession::new(Variant::DarkChess4x8, None, None));
+        write_lock(&games).insert(Uuid::new_v4(), GameSession::new(Variant::DarkChess4x8, Slots::all_human()));
         assert_eq!(read_lock(&games).len(), 1);
     }
 }

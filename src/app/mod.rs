@@ -6,7 +6,8 @@
 //! - [`envops`]：变体无关环境操作（`with_env!` 重建泛型环境、step/终局/合法动作/坐标）；
 //! - [`session`]：快照式对局会话核心（走子/悔棋/棋谱不变量 + 版本号）；
 //! - [`view`]：快照的中性结构化投影（棋盘格位/阵亡/隐藏/终局原因）；
-//! - [`opponent`]：对手抽象（规则对手 / 纯计算引擎的同步决策 + 引擎参数快照）；
+//! - [`player`]：统一选手层（红/黑槽位 `PlayerSlot` + 策略决策 `decide`/`dry_run`
+//!   + 引擎参数快照；对局与玩家/策略解耦的单一真源）；
 //! - [`mcts_view`]：MCTS 搜索树 DTO、只读查询、统计与变体擦除（`MctsTreeView`）；
 //! - [`expectimax_view`]：Expectimax 搜索轨迹树 DTO 与只读查询（可视化）；
 //! - [`search`]：Gumbel MCTS（含树复用）与 NNUE Expectimax 的同步搜索执行；
@@ -23,7 +24,7 @@ pub mod envops;
 pub mod expectimax_view;
 pub mod models;
 pub mod mcts_view;
-pub mod opponent;
+pub mod player;
 pub mod search;
 pub mod session;
 pub mod sync;

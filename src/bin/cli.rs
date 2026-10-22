@@ -7,10 +7,12 @@
 //! 常用示例：
 //! ```text
 //! banqi-cli health
-//! banqi-cli new --opponent nnue                  # 创建对局，返回含 gameId
+//! banqi-cli new --black nnue --model a.nnue       # 创建对局（红=本人，黑=策略），返回含 gameId
 //! banqi-cli move <id> 42                          # 按 action 索引走子
 //! banqi-cli move <id> 3:7                         # 按 from:to 自动匹配合法动作
-//! banqi-cli ai-move <id>                          # 强制 AI 走子
+//! banqi-cli run <id>                              # 当前方按其策略执行一步
+//! banqi-cli dry-run <id>                          # 当前方策略建议走法（不落子）
+//! banqi-cli slots <id> --red human --black random # 对局中切换槽位
 //! banqi-cli undo <id>                             # 悔棋到当前行棋方上次行动前
 //! banqi-cli engine "<BFEN>" --model dark_chess_4x8.nnue   # 无状态引擎查询
 //! banqi-cli mcts root <id>                        # 查看搜索树根节点
@@ -62,34 +64,34 @@ enum Cmd {
         /// 棋盘变体 ID（缺省取服务器默认）
         #[arg(long)]
         variant: Option<String>,
-        /// 对手类型：pvp / random / reveal_first / capture_first / engine / nnue / mcts_onnx
+        /// 红方槽位：human / random / reveal_first / capture_first / engine / nnue / mcts_onnx
         #[arg(long)]
-        opponent: Option<String>,
-        /// AI 执子方：red / black（缺省 auto = AI 执黑，人类执红先行）
+        red: Option<String>,
+        /// 黑方槽位：human / random / reveal_first / capture_first / engine / nnue / mcts_onnx
         #[arg(long)]
-        ai_player: Option<String>,
-        /// 绑定模型文件（须在服务器模型目录内；缺省按变体自动匹配）
+        black: Option<String>,
+        /// 模型类策略绑定的模型文件（须在服务器模型目录内；缺省按变体自动匹配）
         #[arg(long, alias = "model")]
         model_file: Option<String>,
         /// BFEN 局面串：由该局面重建对局（变体以 BFEN 自带标识为准）
         #[arg(long)]
         fen: Option<String>,
-        /// MCTS 模拟次数（MctsOnnx 对手）
+        /// MCTS 模拟次数（Mcts 类策略）
         #[arg(long)]
         mcts_sims: Option<usize>,
-        /// Expectimax 强引擎节点预算（Engine 对手）
+        /// Expectimax 强引擎节点预算
         #[arg(long)]
         engine_budget: Option<u64>,
-        /// NNUE 预算模式：nodes / depth_nodes / time
+        /// Expectimax 预算模式：nodes / depth_nodes / time
         #[arg(long)]
         nnue_mode: Option<String>,
-        /// NNUE 搜索深度（depth_nodes 模式）
+        /// Expectimax 搜索深度（depth_nodes 模式）
         #[arg(long)]
         nnue_depth: Option<i32>,
-        /// NNUE 节点预算（nodes / depth_nodes 模式）
+        /// Expectimax 节点预算（nodes / depth_nodes 模式）
         #[arg(long)]
         nnue_budget: Option<u64>,
-        /// NNUE 时间预算毫秒（time 模式）
+        /// Expectimax 时间预算毫秒（time 模式）
         #[arg(long)]
         nnue_time_ms: Option<u64>,
         /// 搜索硬超时毫秒
@@ -106,16 +108,38 @@ enum Cmd {
         /// action 索引，或 from:to / from-to
         action: String,
     },
-    /// 强制 AI 走子（POST /api/games/:id/ai-move，仅 AI 回合可用）
-    AiMove { id: String },
+    /// 单步推进（POST /api/games/:id/run）：当前行棋方按其策略执行一步
+    Run { id: String },
+    /// dry-run（POST /api/games/:id/dry-run）：当前方策略建议走法（不落子）。
+    /// Human 方可加 --kind 指定提示策略
+    DryRun {
+        id: String,
+        /// 提示策略种类（仅当前方为 Human 时生效；缺省 Expectimax）
+        #[arg(long)]
+        kind: Option<String>,
+        /// 提示策略的模型文件（模型类策略需要；缺省按变体自动匹配）
+        #[arg(long, alias = "model")]
+        model_file: Option<String>,
+    },
     /// 悔棋（POST /api/games/:id/undo）。STEPS 缺省 = 悔到当前行棋方上次行动前
     Undo {
         id: String,
         /// 显式回退步数（按快照逐帧回退）
         steps: Option<usize>,
     },
-    /// 为进行中的对局重绑模型（PUT /api/games/:id/model，同步切换推理后端）
-    Bind { id: String, model_file: String },
+    /// 对局中切换槽位（PUT /api/games/:id/slots，只更新给出的方）
+    Slots {
+        id: String,
+        /// 红方槽位：human / random / reveal_first / capture_first / engine / nnue / mcts_onnx
+        #[arg(long)]
+        red: Option<String>,
+        /// 黑方槽位：human / random / reveal_first / capture_first / engine / nnue / mcts_onnx
+        #[arg(long)]
+        black: Option<String>,
+        /// 模型类策略绑定的模型文件（缺省按变体自动匹配）
+        #[arg(long, alias = "model")]
+        model_file: Option<String>,
+    },
     /// 删除对局（DELETE /api/games/:id）
     Delete { id: String },
     /// 无状态引擎查询（POST /api/engine/move）：BFEN 局面 → 引擎最优动作，
@@ -287,35 +311,88 @@ macro_rules! set_opt {
     };
 }
 
-/// CLI 创建对局请求体：字段全部可选，逐项透传。
+/// 单槽位请求体（kind 缺省 = Human；模型/参数仅在策略槽位时附带）。
 #[allow(clippy::too_many_arguments)]
-fn create_game_body(
-    variant: Option<String>,
-    opponent: Option<String>,
-    ai_player: Option<String>,
-    model_file: Option<String>,
-    fen: Option<String>,
-    mcts_sims: Option<usize>,
-    engine_budget: Option<u64>,
-    nnue_mode: Option<String>,
-    nnue_depth: Option<i32>,
-    nnue_budget: Option<u64>,
-    nnue_time_ms: Option<u64>,
-    search_timeout_ms: Option<u64>,
+fn slot_body(
+    kind: &Option<String>,
+    model_file: &Option<String>,
+    mcts_sims: &Option<usize>,
+    engine_budget: &Option<u64>,
+    nnue_mode: &Option<String>,
+    nnue_depth: &Option<i32>,
+    nnue_budget: &Option<u64>,
+    nnue_time_ms: &Option<u64>,
+    search_timeout_ms: &Option<u64>,
+) -> Value {
+    let Some(kind) = kind.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
+        return json!({ "kind": "Human" });
+    };
+    let mut s = json!({ "kind": kind });
+    if !kind.eq_ignore_ascii_case("human") {
+        if let Some(m) = model_file.as_deref().filter(|s| !s.is_empty()) {
+            s["modelFile"] = json!(m);
+        }
+        let mut p = json!({});
+        set_opt!(p, "mctsSims", mcts_sims);
+        set_opt!(p, "engineBudget", engine_budget);
+        set_opt!(p, "nnueBudgetMode", nnue_mode);
+        set_opt!(p, "nnueDepth", nnue_depth);
+        set_opt!(p, "nnueBudget", nnue_budget);
+        set_opt!(p, "nnueTimeMs", nnue_time_ms);
+        set_opt!(p, "searchTimeoutMs", search_timeout_ms);
+        if p.as_object().is_some_and(|o| !o.is_empty()) {
+            s["params"] = p;
+        }
+    }
+    s
+}
+
+/// CLI 建局 / 换槽位请求体：双方槽位 + 引擎参数逐项透传。
+#[allow(clippy::too_many_arguments)]
+fn slots_body(
+    red: &Option<String>,
+    black: &Option<String>,
+    model_file: &Option<String>,
+    mcts_sims: &Option<usize>,
+    engine_budget: &Option<u64>,
+    nnue_mode: &Option<String>,
+    nnue_depth: &Option<i32>,
+    nnue_budget: &Option<u64>,
+    nnue_time_ms: &Option<u64>,
+    search_timeout_ms: &Option<u64>,
 ) -> Value {
     let mut b = json!({});
-    set_opt!(b, "variant", variant);
-    set_opt!(b, "opponent", opponent);
-    set_opt!(b, "aiPlayer", ai_player);
-    set_opt!(b, "modelFile", model_file);
-    set_opt!(b, "fen", fen);
-    set_opt!(b, "mctsSims", mcts_sims);
-    set_opt!(b, "engineBudget", engine_budget);
-    set_opt!(b, "nnueBudgetMode", nnue_mode);
-    set_opt!(b, "nnueDepth", nnue_depth);
-    set_opt!(b, "nnueBudget", nnue_budget);
-    set_opt!(b, "nnueTimeMs", nnue_time_ms);
-    set_opt!(b, "searchTimeoutMs", search_timeout_ms);
+    let red_slot = red.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let black_slot = black.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    if red_slot.is_some() || black_slot.is_some() {
+        b["slots"] = json!({});
+        if let Some(red) = red_slot {
+            b["slots"]["red"] = slot_body(
+                &Some(red.to_string()),
+                model_file,
+                mcts_sims,
+                engine_budget,
+                nnue_mode,
+                nnue_depth,
+                nnue_budget,
+                nnue_time_ms,
+                search_timeout_ms,
+            );
+        }
+        if let Some(black) = black_slot {
+            b["slots"]["black"] = slot_body(
+                &Some(black.to_string()),
+                model_file,
+                mcts_sims,
+                engine_budget,
+                nnue_mode,
+                nnue_depth,
+                nnue_budget,
+                nnue_time_ms,
+                search_timeout_ms,
+            );
+        }
+    }
     b
 }
 
@@ -422,8 +499,8 @@ fn run(base_url: &str, cmd: Cmd) -> Result<Option<String>, String> {
         },
         Cmd::New {
             variant,
-            opponent,
-            ai_player,
+            red,
+            black,
             model_file,
             fen,
             mcts_sims,
@@ -434,20 +511,20 @@ fn run(base_url: &str, cmd: Cmd) -> Result<Option<String>, String> {
             nnue_time_ms,
             search_timeout_ms,
         } => {
-            let body = create_game_body(
-                variant,
-                opponent,
-                ai_player,
-                model_file,
-                fen,
-                mcts_sims,
-                engine_budget,
-                nnue_mode,
-                nnue_depth,
-                nnue_budget,
-                nnue_time_ms,
-                search_timeout_ms,
+            let mut body = slots_body(
+                &red,
+                &black,
+                &model_file,
+                &mcts_sims,
+                &engine_budget,
+                &nnue_mode,
+                &nnue_depth,
+                &nnue_budget,
+                &nnue_time_ms,
+                &search_timeout_ms,
             );
+            set_opt!(body, "variant", variant);
+            set_opt!(body, "fen", fen);
             print(cli.post("/api/games", Some(body))?)
         }
         Cmd::Show { id } => print(cli.get(&format!("/api/games/{id}"))?),
@@ -455,7 +532,13 @@ fn run(base_url: &str, cmd: Cmd) -> Result<Option<String>, String> {
             let idx = resolve_action(&cli, &id, &action)?;
             print(cli.post(&format!("/api/games/{id}/move"), Some(json!({ "action": idx })))?)
         }
-        Cmd::AiMove { id } => print(cli.post(&format!("/api/games/{id}/ai-move"), None)?),
+        Cmd::Run { id } => print(cli.post(&format!("/api/games/{id}/run"), None)?),
+        Cmd::DryRun { id, kind, model_file } => {
+            let mut b = json!({});
+            set_opt!(b, "kind", kind);
+            set_opt!(b, "modelFile", model_file);
+            print(cli.post(&format!("/api/games/{id}/dry-run"), Some(b))?)
+        }
         Cmd::Undo { id, steps } => {
             let body = match steps {
                 Some(s) => json!({ "steps": s }),
@@ -463,9 +546,20 @@ fn run(base_url: &str, cmd: Cmd) -> Result<Option<String>, String> {
             };
             print(cli.post(&format!("/api/games/{id}/undo"), Some(body))?)
         }
-        Cmd::Bind { id, model_file } => print(cli.put(
-            &format!("/api/games/{id}/model"),
-            json!({ "modelFile": model_file }),
+        Cmd::Slots { id, red, black, model_file } => print(cli.put(
+            &format!("/api/games/{id}/slots"),
+            slots_body(
+                &red,
+                &black,
+                &model_file,
+                &None,
+                &None,
+                &None,
+                &None,
+                &None,
+                &None,
+                &None,
+            ),
         )?),
         Cmd::Delete { id } => {
             // DELETE 返回 204（无响应体）

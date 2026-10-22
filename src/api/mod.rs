@@ -1,5 +1,6 @@
 //! Router 组装与基础端点（health / variants）。
 
+pub mod agents;
 pub mod engine;
 pub mod games;
 pub mod mcts;
@@ -22,12 +23,18 @@ use crate::web;
 pub fn router(state: SharedState) -> Router {
     Router::new()
         .route("/api/games", post(games::create_game).get(games::list_games))
+        .route("/api/agents", post(agents::create_agent).get(agents::list_agents))
+        .route(
+            "/api/agents/{id}",
+            get(agents::get_agent).delete(agents::delete_agent),
+        )
+        .route("/api/agents/{id}/settings", put(agents::update_agent_settings))
         .route("/api/games/{id}", get(games::get_game).delete(games::delete_game))
         .route("/api/games/{id}/move", post(games::move_piece))
-        .route("/api/games/{id}/ai-move", post(games::ai_move))
+        .route("/api/games/{id}/run", post(games::run))
+        .route("/api/games/{id}/dry-run", post(games::dry_run))
         .route("/api/games/{id}/undo", post(games::undo))
-        .route("/api/games/{id}/model", put(games::bind_model))
-        .route("/api/games/{id}/opponent", get(games::get_opponent))
+        .route("/api/games/{id}/slots", put(games::put_slots))
         .route("/api/games/{id}/move-action", get(games::move_action))
         .route("/api/games/{id}/mcts/root", get(mcts::root))
         .route("/api/games/{id}/mcts/search", post(mcts::search))
