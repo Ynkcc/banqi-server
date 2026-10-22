@@ -7,8 +7,6 @@
 /// gui / server 收敛出的共享应用层（原 banqi-app crate 并入，见 archive/banqi-app）
 pub mod app;
 
-mod variant;
-
 mod ai;
 mod api;
 mod config;

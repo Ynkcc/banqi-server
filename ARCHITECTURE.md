@@ -156,6 +156,17 @@ cargo run --bin banqi-cli -- health         # CLI 冒烟测试
 
 ## 变更记录
 
+- 2026-10-23：去重与正确性收敛：①手动搜索锁 2 版本校验收口——`state.rs` 新增
+  `store_manual_search_trees`（版本号变化时丢弃结果），`api/mcts.rs` / `api/nnue.rs`
+  的 search 端点此前无版本校验（与 ai.rs 三段式口径分叉，并发下树可能写入错误局面）；
+  ②`state.rs` 新增 `strategy_slot_view`（`slot_view` 与 `api/agents.rs::agent_view`
+  的 budget 五元组 match 单一真源）与泛型 `parse_id`（对局/Agent/节点 ID 解析收敛）；
+  ③删除 `variant.rs` 薄 re-export（唯一消费者 state.rs 改指 `app::envops`）；
+  删除 Cargo.toml 零引用的 `ort` 直接依赖；④`app/search.rs` 抽取 `mcts_search_impl`
+  （torch/onnx 两个三臂 match 逐字同构）与 `nnue_stats_from`，删除无调用方的
+  `nnue_search`（非 tree 版，唯一调用方 banqi-gui 已归档）；⑤`app/player.rs::decide`
+  的 MctsOnnx/MctsDL 两臂收敛为 `mcts_branch` 公共装配。
+
 - 2026-10-22：对局与玩家/策略解耦：废除"对局模式"，新增 `app/player.rs` 统一选手层
   （`PlayerSlot`/`Slots` + `decide`/`dry_run` 单一决策入口，收编 opponent.rs 与 ai.rs
   大 match）；`GameSession.slots` 双槽位替代 `Option<OpponentConfig>`；REST 契约破坏性

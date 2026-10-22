@@ -9,12 +9,14 @@ use axum::Json;
 use crate::app::sync::{read_lock, write_lock};
 use crate::error::ApiError;
 use crate::mcts::{MctsEdge, MctsNodeBoard, MctsNodeDetail, MctsRootInfo};
-use crate::state::{get_mut_session, get_session, mcts_tree_of, parse_game_id, SharedState};
+use crate::state::{
+    get_mut_session, get_session, mcts_tree_of, parse_game_id, parse_id, store_manual_search_trees,
+    SharedState,
+};
 
 /// 解析路径中的节点 ID。
 fn parse_node_id(raw: &str) -> Result<usize, ApiError> {
-    raw.parse()
-        .map_err(|_| ApiError::BadRequest(format!("非法节点 ID: {raw}")))
+    parse_id(raw, "节点 ID")
 }
 
 /// GET /api/games/:id/mcts/root
@@ -80,7 +82,7 @@ pub async fn search(
     let game_id = parse_game_id(&id)?;
 
     // 锁 1：读取搜索所需数据并取出上一棵树供复用（立即释放，不跨 await）
-    let (snap, slot, prev_tree) = {
+    let (snap, slot, prev_tree, version) = {
         let mut games = write_lock(&app.games);
         let s = get_mut_session(&mut games, &id, game_id)?;
         let current = s.core.current.current_player;
@@ -107,7 +109,7 @@ pub async fn search(
             }
         };
         let prev_tree = s.take_reusable_mcts_tree();
-        (s.core.current.clone(), slot, prev_tree)
+        (s.core.current.clone(), slot, prev_tree, s.core.version)
     };
 
     // 锁外搜索（blocking 线程池；模型随用随加载，缓存命中直接返回）
@@ -122,10 +124,9 @@ pub async fn search(
     })?;
     let info = tree.root_info();
 
+    // 锁 2：版本号一致时存入会话（期间对局被修改则丢弃，正常竞态）
     let mut games = write_lock(&app.games);
-    if let Some(s) = games.get_mut(&game_id) {
-        s.mcts_tree = Some(tree);
-    }
+    store_manual_search_trees(&mut games, game_id, version, Some(tree), None);
     tracing::info!(game = %game_id, "手动 MCTS 搜索完成");
     Ok(Json(info))
 }

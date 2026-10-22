@@ -408,15 +408,15 @@ pub fn decide(
         StrategyKind::MctsOnnx => {
             #[cfg(feature = "onnx")]
             {
-                let file = model_file.ok_or("MctsOnnx 策略未绑定 .onnx 模型文件")?;
-                let model = pool.acquire_onnx(&file)?;
-                let tree = crate::app::search::mcts_search_onnx(
+                mcts_branch(
+                    model_file,
+                    "MctsOnnx 策略未绑定 .onnx 模型文件",
                     &env,
                     params.mcts_sims,
-                    Some(model),
                     prev_tree,
-                )?;
-                Ok(mcts_decision(tree))
+                    |f| pool.acquire_onnx(f),
+                    crate::app::search::mcts_search_onnx::<DarkChessEnv>,
+                )
             }
             #[cfg(not(feature = "onnx"))]
             {
@@ -427,15 +427,15 @@ pub fn decide(
         StrategyKind::MctsDL => {
             #[cfg(feature = "torch")]
             {
-                let file = model_file.ok_or("MctsDL 策略未绑定 .pt 模型文件")?;
-                let model = pool.acquire_torch(&file)?;
-                let tree = crate::app::search::mcts_search_torch(
+                mcts_branch(
+                    model_file,
+                    "MctsDL 策略未绑定 .pt 模型文件",
                     &env,
                     params.mcts_sims,
-                    Some(model),
                     prev_tree,
-                )?;
-                Ok(mcts_decision(tree))
+                    |f| pool.acquire_torch(f),
+                    crate::app::search::mcts_search_torch::<DarkChessEnv>,
+                )
             }
             #[cfg(not(feature = "torch"))]
             {
@@ -444,6 +444,29 @@ pub fn decide(
             }
         }
     }
+}
+
+/// MCTS 类策略分支的公共装配（torch / onnx 两臂同构收口）：
+/// 模型文件校验 → 随用随加载 → 搜索（含树复用）→ 决策组装。
+#[cfg(any(feature = "onnx", feature = "torch"))]
+fn mcts_branch<M>(
+    file: Option<String>,
+    missing: &str,
+    env: &DarkChessEnv,
+    sims: usize,
+    prev_tree: Option<MctsTree<DarkChessEnv>>,
+    acquire: impl FnOnce(&str) -> Result<Arc<M>, String>,
+    search: impl FnOnce(
+        &DarkChessEnv,
+        usize,
+        Option<Arc<M>>,
+        Option<MctsTree<DarkChessEnv>>,
+    ) -> Result<MctsTree<DarkChessEnv>, String>,
+) -> Result<Decision, String> {
+    let file = file.ok_or(missing)?;
+    let model = acquire(&file)?;
+    let tree = search(env, sims, Some(model), prev_tree)?;
+    Ok(mcts_decision(tree))
 }
 
 /// MCTS 决策产出组装：动作 + 整树 + 统计 + 根 q 均值。

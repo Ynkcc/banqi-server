@@ -10,7 +10,8 @@ use std::sync::{RwLock, Arc};
 
 use uuid::Uuid;
 
-use crate::app::player::{Agent, EngineParams, PlayerSlot, Slots};
+use crate::app::envops::{coords_for_action, StepOutcome};
+use crate::app::player::{Agent, EngineParams, PlayerSlot, Slots, StrategyKind};
 use crate::app::search::{BudgetMode, SearchBudget};
 use crate::app::session::SnapshotSession;
 use crate::app::sync::{read_lock, write_lock};
@@ -20,7 +21,6 @@ use banqi_engine::nnue::NnueEvaluator;
 use crate::config::ServerConfig;
 use crate::dto::{winner_str, ActionView, GameStateResp, HistoryMoveView, SlotView, SlotsView};
 use crate::error::ApiError;
-use crate::variant;
 
 /// 树复用的具体树类型（本 server 的 MCTS 搜索统一以 `DarkChessEnv` 实例化，
 /// `DarkChessEnv::from_snapshot` 按快照自带变体配置重建，所有变体通用）。
@@ -99,7 +99,7 @@ impl GameSession {
     pub fn apply_action(
         &mut self,
         action: usize,
-    ) -> Result<variant::StepOutcome, ApiError> {
+    ) -> Result<StepOutcome, ApiError> {
         self.core.apply_action(action).map_err(ApiError::from)
     }
 
@@ -122,7 +122,7 @@ impl GameSession {
 
     /// 单个动作的结构化视图（坐标 + 机会标记）。
     pub fn action_view(&self, action: usize) -> ActionView {
-        let coords = variant::coords_for_action(self.core.variant, action).unwrap_or_default();
+        let coords = coords_for_action(self.core.variant, action).unwrap_or_default();
         ActionView {
             action,
             from: coords.first().copied().unwrap_or(action),
@@ -231,6 +231,39 @@ impl GameSession {
     }
 }
 
+/// 策略槽位的参数摘要视图（`slot_view` 与 api/agents.rs `agent_view`
+/// 共用的单一真源：按策略种类下发生效参数摘要）。
+pub fn strategy_slot_view(
+    kind: StrategyKind,
+    model_file: Option<String>,
+    params: EngineParams,
+) -> SlotView {
+    let b = &params.nnue_budget;
+    let (budget_mode, nnue_depth, nnue_budget, nnue_time_ms, search_timeout_ms) = match kind {
+        StrategyKind::ExpectimaxNnue => (
+            Some(b.mode.as_str().to_string()),
+            (b.mode == BudgetMode::DepthNodes).then_some(b.depth),
+            (b.mode != BudgetMode::Time).then_some(b.nodes),
+            (b.mode == BudgetMode::Time).then_some(b.time_ms),
+            Some(b.timeout_ms),
+        ),
+        StrategyKind::Expectimax => (None, None, None, None, Some(b.timeout_ms)),
+        _ => (None, None, None, None, None),
+    };
+    SlotView {
+        kind: kind.as_str().to_string(),
+        agent_id: None,
+        model_file,
+        mcts_sims: kind.is_mcts().then_some(params.mcts_sims),
+        engine_budget: (kind == StrategyKind::Expectimax).then_some(params.engine_budget),
+        budget_mode,
+        nnue_depth,
+        nnue_budget,
+        nnue_time_ms,
+        search_timeout_ms,
+    }
+}
+
 /// 单个选手槽位的状态视图（Human 只下发 kind；策略槽位附参数摘要；
 /// Agent 槽位下发 agent_id，实际策略由 Agent 实时持有）。
 fn slot_view(slot: &PlayerSlot) -> SlotView {
@@ -245,43 +278,7 @@ fn slot_view(slot: &PlayerSlot) -> SlotView {
             kind,
             model_file,
             params,
-        } => {
-            let b = &params.nnue_budget;
-            let (budget_mode, nnue_depth, nnue_budget, nnue_time_ms, search_timeout_ms) =
-                match kind {
-                    crate::app::player::StrategyKind::ExpectimaxNnue => (
-                        Some(b.mode.as_str().to_string()),
-                        (b.mode == BudgetMode::DepthNodes).then_some(b.depth),
-                        (b.mode != BudgetMode::Time).then_some(b.nodes),
-                        (b.mode == BudgetMode::Time).then_some(b.time_ms),
-                        Some(b.timeout_ms),
-                    ),
-                    crate::app::player::StrategyKind::Expectimax => (
-                        None,
-                        None,
-                        None,
-                        None,
-                        Some(b.timeout_ms),
-                    ),
-                    _ => (None, None, None, None, None),
-                };
-            SlotView {
-                kind: kind.as_str().to_string(),
-                agent_id: None,
-                model_file: model_file.clone(),
-                mcts_sims: kind.is_mcts().then_some(params.mcts_sims),
-                engine_budget: (matches!(
-                    kind,
-                    crate::app::player::StrategyKind::Expectimax
-                ))
-                .then_some(params.engine_budget),
-                budget_mode,
-                nnue_depth,
-                nnue_budget,
-                nnue_time_ms,
-                search_timeout_ms,
-            }
-        }
+        } => strategy_slot_view(*kind, model_file.clone(), *params),
     }
 }
 
@@ -310,9 +307,50 @@ pub type SharedState = std::sync::Arc<AppState>;
 // 路由层公共辅助：对局 ID 解析 / 会话存取 / 搜索树读取（api 各文件共用）
 // ============================================================================
 
+/// 通用 ID 解析（非法时 400；api 各文件的 UUID / 节点 ID 解析共用单一真源）。
+/// `label` 用于错误消息（如 "对局 ID" / "Agent ID" / "节点 ID"）。
+pub fn parse_id<T: std::str::FromStr>(raw: &str, label: &str) -> Result<T, ApiError> {
+    raw.parse()
+        .map_err(|_| ApiError::BadRequest(format!("非法{label}: {raw}")))
+}
+
 /// 解析路径中的对局 ID（非法时 400）。
 pub fn parse_game_id(raw: &str) -> Result<Uuid, ApiError> {
-    Uuid::parse_str(raw).map_err(|_| ApiError::BadRequest(format!("非法对局 ID: {raw}")))
+    parse_id(raw, "对局 ID")
+}
+
+/// 锁 2：版本号一致时把手动搜索结果存入会话（api/mcts.rs 与 api/nnue.rs 共用）。
+///
+/// 只覆盖 `Some` 的字段——MCTS 树与 Expectimax 轨迹树两种手动搜索互不覆盖。
+/// 版本号变化（搜索期间对局被走子/悔棋/改槽位）时整体丢弃，正常竞态不视为
+/// 错误；策略回合的存树语义（含 None 清空）由 ai.rs `apply_strategy_action`
+/// 单点处理，不经此函数。
+/// 返回是否已存入。
+pub fn store_manual_search_trees(
+    games: &mut HashMap<Uuid, GameSession>,
+    game_id: Uuid,
+    expect_version: u64,
+    mcts_tree: Option<crate::mcts::MctsTreeBox>,
+    ex_tree: Option<crate::app::expectimax_view::ExpectimaxTree>,
+) -> bool {
+    let Some(s) = games.get_mut(&game_id) else {
+        return false;
+    };
+    if s.core.version != expect_version {
+        tracing::info!(
+            game = %game_id,
+            "手动搜索结果作废: 版本号 {expect_version} != {}（期间对局已被修改）",
+            s.core.version
+        );
+        return false;
+    }
+    if mcts_tree.is_some() {
+        s.mcts_tree = mcts_tree;
+    }
+    if ex_tree.is_some() {
+        s.expectimax_tree = ex_tree;
+    }
+    true
 }
 
 /// 从对局表读取会话（不存在时 404；`label` 用于错误消息，通常为路径原始 ID）。

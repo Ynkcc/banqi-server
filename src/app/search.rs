@@ -293,6 +293,25 @@ where
     None
 }
 
+/// Gumbel MCTS 搜索公共核心：复用分派 + `GumbelConfig::for_play` 单点构造
+/// （torch / onnx 两个薄包装共用；此前两条三臂 match 逐字符相同）。
+fn mcts_search_impl<G, E>(
+    env: &G,
+    sims: usize,
+    prev_tree: Option<MctsTree<G>>,
+    evaluator: &E,
+) -> Result<MctsTree<G>, String>
+where
+    G: GameEnv + Copy + SnapshotEnv + 'static,
+    E: Evaluator<G>,
+{
+    match mcts_reuse(env, prev_tree) {
+        MctsReuse::SameRoot(t) => run_gumbel_reuse_root(env, evaluator, GumbelConfig::for_play(sims), t),
+        MctsReuse::Advance(reuse) => run_gumbel(env, evaluator, GumbelConfig::for_play(sims), reuse),
+        MctsReuse::None => run_gumbel(env, evaluator, GumbelConfig::for_play(sims), None),
+    }
+}
+
 /// Gumbel MCTS + TorchScript（需 torch feature）：含树复用（根一致直接续用 /
 /// 两步推进 / 全新建树，见 [`mcts_reuse`]）。
 /// 泛型支持全部变体环境（调用方经 `with_env!` 以具体环境类型实例化）。
@@ -308,11 +327,7 @@ where
 {
     let model = model.ok_or("未加载 .pt 模型，无法执行 MCTS+DL 搜索")?;
     let evaluator = banqi_engine::engine::TchEvaluator::<G>::new(model);
-    match mcts_reuse(env, prev_tree) {
-        MctsReuse::SameRoot(t) => run_gumbel_reuse_root(env, &evaluator, GumbelConfig::for_play(sims), t),
-        MctsReuse::Advance(reuse) => run_gumbel(env, &evaluator, GumbelConfig::for_play(sims), reuse),
-        MctsReuse::None => run_gumbel(env, &evaluator, GumbelConfig::for_play(sims), None),
-    }
+    mcts_search_impl(env, sims, prev_tree, &evaluator)
 }
 
 /// Gumbel MCTS + ONNX（需 onnx feature）：含树复用（根一致直接续用 /
@@ -330,11 +345,7 @@ where
 {
     let model = model.ok_or("未加载 .onnx 模型，无法执行 MCTS+ONNX 搜索")?;
     let evaluator = banqi_engine::inference::onnx::OnnxEvaluator::<G>::new(model);
-    match mcts_reuse(env, prev_tree) {
-        MctsReuse::SameRoot(t) => run_gumbel_reuse_root(env, &evaluator, GumbelConfig::for_play(sims), t),
-        MctsReuse::Advance(reuse) => run_gumbel(env, &evaluator, GumbelConfig::for_play(sims), reuse),
-        MctsReuse::None => run_gumbel(env, &evaluator, GumbelConfig::for_play(sims), None),
-    }
+    mcts_search_impl(env, sims, prev_tree, &evaluator)
 }
 
 /// 一次 Expectimax（NNUE / 规则叶评估）搜索的统计（不含后端标识；DTO 由调用方组装）。
@@ -356,40 +367,29 @@ pub struct NnueSearchStats {
     pub elapsed_ms: u64,
 }
 
-/// Expectimax 搜索一次（NNUE 叶评估；同步；调用方自行 spawn_blocking）。
-/// 搜索入口校验 `.nnue` 头部布局（跨变体权重硬失败）；
-/// 预算约束由 [`SearchBudget`] 单点换算。返回 `(选择的动作, 搜索统计)`。
-pub fn nnue_search(
-    env: &DarkChessEnv,
-    evaluator: Arc<NnueEvaluator>,
-    budget: SearchBudget,
-) -> Result<(usize, NnueSearchStats), String> {
-    let budget = budget.clamped();
-    evaluator
-        .validate_layout(&env.config)
-        .map_err(|e| format!(".nnue 权重与当前变体布局不匹配: {e}"))?;
-    let mut cfg = budget.to_search_config();
-    cfg.nnue_evaluator = Some(evaluator);
-    let started = Instant::now();
-    let SearchResult { action, depth: reached_depth, nodes, .. } = banqi_core::core::expectimax::search(env, &cfg)
-        .ok_or_else(|| "Expectimax 未返回动作（无合法动作）".to_string())?;
-    let elapsed_ms = started.elapsed().as_millis() as u64;
-    Ok((
-        action,
-        NnueSearchStats {
-            mode: budget.mode.as_str(),
-            depth: if budget.mode == BudgetMode::DepthNodes { cfg.max_depth } else { 0 },
-            budget: if budget.mode != BudgetMode::Time { cfg.node_budget } else { 0 },
-            time_limit_ms: cfg.time_limit_ms,
-            nodes,
-            reached_depth,
-            elapsed_ms,
-        },
-    ))
+/// 由预算/生效配置/搜索结果组装统计（`nnue_search_tree` 单点使用；
+/// 此前与已删除的 `nnue_search` 逐字重复 9 行）。
+fn nnue_stats_from(
+    budget: &SearchBudget,
+    cfg: &SearchConfig,
+    nodes: u64,
+    reached_depth: i32,
+    elapsed_ms: u64,
+) -> NnueSearchStats {
+    NnueSearchStats {
+        mode: budget.mode.as_str(),
+        depth: if budget.mode == BudgetMode::DepthNodes { cfg.max_depth } else { 0 },
+        budget: if budget.mode != BudgetMode::Time { cfg.node_budget } else { 0 },
+        time_limit_ms: cfg.time_limit_ms,
+        nodes,
+        reached_depth,
+        elapsed_ms,
+    }
 }
 
 /// Expectimax + NNUE 搜索一次并捕获搜索轨迹树（可视化；同步）。
-/// 在 [`nnue_search`] 基础上追加可视化约束：`threads = 1`（多线程搜索碎片
+/// 搜索入口校验 `.nnue` 头部布局（跨变体权重硬失败）；预算约束由
+/// [`SearchBudget`] 单点换算。可视化约束：`threads = 1`（多线程搜索碎片
 /// 无法连贯成树）、剔除 `FEAT_ASP`（fail 重搜污染同层树）、`collect_tree = true`。
 /// 返回 `(选择的动作, ExpectimaxTree)`；预算耗尽时树为最近完成层。
 pub fn nnue_search_tree(
@@ -419,15 +419,7 @@ pub fn nnue_search_tree(
         crate::app::expectimax_view::ExpectimaxTree {
             tree: tree.unwrap_or_default(),
             chosen_action: action,
-            stats: NnueSearchStats {
-                mode: budget.mode.as_str(),
-                depth: if budget.mode == BudgetMode::DepthNodes { cfg.max_depth } else { 0 },
-                budget: if budget.mode != BudgetMode::Time { cfg.node_budget } else { 0 },
-                time_limit_ms: cfg.time_limit_ms,
-                nodes,
-                reached_depth,
-                elapsed_ms,
-            },
+            stats: nnue_stats_from(&budget, &cfg, nodes, reached_depth, elapsed_ms),
         },
     ))
 }

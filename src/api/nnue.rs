@@ -11,7 +11,6 @@
 use axum::extract::{Path, State};
 use axum::Json;
 use banqi_core::core::env::DarkChessEnv;
-use uuid::Uuid;
 
 use crate::app::sync::{read_lock, write_lock};
 use crate::error::ApiError;
@@ -19,21 +18,14 @@ use crate::nnue::{
     ex_edge_list, ex_node_board, ex_node_summary, ex_root_info, ExEdge, ExNodeBoard,
     ExNodeSummary, ExRootInfo,
 };
-use crate::state::SharedState;
-
-fn parse_ids(id: String, node: String) -> Result<(Uuid, usize), ApiError> {
-    let game_id = Uuid::parse_str(&id).map_err(|_| ApiError::BadRequest(format!("非法对局 ID: {id}")))?;
-    let node_id: usize =
-        node.parse().map_err(|_| ApiError::BadRequest(format!("非法节点 ID: {node}")))?;
-    Ok((game_id, node_id))
-}
+use crate::state::{parse_game_id, parse_id, store_manual_search_trees, SharedState};
 
 /// GET /api/games/:id/nnue/root
 pub async fn root(
     State(app): State<SharedState>,
     Path(id): Path<String>,
 ) -> Result<Json<ExRootInfo>, ApiError> {
-    let game_id = Uuid::parse_str(&id).map_err(|_| ApiError::BadRequest(format!("非法对局 ID: {id}")))?;
+    let game_id = parse_game_id(&id)?;
     let games = read_lock(&app.games);
     let s = games
         .get(&game_id)
@@ -47,7 +39,8 @@ pub async fn children(
     State(app): State<SharedState>,
     Path((id, node)): Path<(String, String)>,
 ) -> Result<Json<Vec<ExEdge>>, ApiError> {
-    let (game_id, node_id) = parse_ids(id, node)?;
+    let game_id = parse_game_id(&id)?;
+    let node_id: usize = parse_id(&node, "节点 ID")?;
     let games = read_lock(&app.games);
     let s = games.get(&game_id).ok_or(ApiError::GameNotFound(game_id.to_string()))?;
     let kept = s.expectimax_tree.as_ref().ok_or(ApiError::NnueTreeMissing)?;
@@ -62,7 +55,8 @@ pub async fn detail(
     State(app): State<SharedState>,
     Path((id, node)): Path<(String, String)>,
 ) -> Result<Json<ExNodeSummary>, ApiError> {
-    let (game_id, node_id) = parse_ids(id, node)?;
+    let game_id = parse_game_id(&id)?;
+    let node_id: usize = parse_id(&node, "节点 ID")?;
     let games = read_lock(&app.games);
     let s = games.get(&game_id).ok_or(ApiError::GameNotFound(game_id.to_string()))?;
     let kept = s.expectimax_tree.as_ref().ok_or(ApiError::NnueTreeMissing)?;
@@ -76,7 +70,8 @@ pub async fn board(
     State(app): State<SharedState>,
     Path((id, node)): Path<(String, String)>,
 ) -> Result<Json<ExNodeBoard>, ApiError> {
-    let (game_id, node_id) = parse_ids(id, node)?;
+    let game_id = parse_game_id(&id)?;
+    let node_id: usize = parse_id(&node, "节点 ID")?;
     let games = read_lock(&app.games);
     let s = games.get(&game_id).ok_or(ApiError::GameNotFound(game_id.to_string()))?;
     let kept = s.expectimax_tree.as_ref().ok_or(ApiError::NnueTreeMissing)?;
@@ -95,10 +90,10 @@ pub async fn search(
     State(app): State<SharedState>,
     Path(id): Path<String>,
 ) -> Result<Json<ExRootInfo>, ApiError> {
-    let game_id = Uuid::parse_str(&id).map_err(|_| ApiError::BadRequest(format!("非法对局 ID: {id}")))?;
+    let game_id = parse_game_id(&id)?;
 
     // 锁 1：读取搜索所需数据（立即释放，不跨 await）
-    let (_variant, snap, budget, model_file) = {
+    let (variant, snap, budget, model_file, version) = {
         let games = read_lock(&app.games);
         let s = games
             .get(&game_id)
@@ -119,7 +114,7 @@ pub async fn search(
             } => f.clone(),
             _ => app.resolve_model_file(None, s.core.variant)?,
         };
-        (s.core.variant, s.core.current.clone(), budget, model_file)
+        (s.core.variant, s.core.current.clone(), budget, model_file, s.core.version)
     };
 
     // 锁外取对局绑定的 .nnue 模型并执行树捕获搜索
@@ -130,7 +125,7 @@ pub async fn search(
         ));
     }
     let evaluator = app
-        .acquire_nnue_validated(model_file, _variant)
+        .acquire_nnue_validated(model_file, variant)
         .await
         .map_err(ApiError::ModelUnavailable)?;
     let kept = tokio::task::spawn_blocking(move || {
@@ -146,10 +141,9 @@ pub async fn search(
 
     let info = ex_root_info(&kept).ok_or_else(|| ApiError::Internal("搜索未产生轨迹树".into()))?;
 
+    // 锁 2：版本号一致时存入会话（期间对局被修改则丢弃，正常竞态）
     let mut games = write_lock(&app.games);
-    if let Some(s) = games.get_mut(&game_id) {
-        s.expectimax_tree = Some(kept);
-    }
+    store_manual_search_trees(&mut games, game_id, version, None, Some(kept));
     tracing::info!(game = %game_id, "手动 Expectimax 搜索完成");
     Ok(Json(info))
 }

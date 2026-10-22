@@ -16,50 +16,20 @@ use axum::Json;
 use uuid::Uuid;
 
 use crate::app::player::{Agent, StrategyKind};
-use crate::dto::{AgentResp, AgentsListResp, CreateAgentReq, SlotParamsReq, SlotView};
+use crate::dto::{AgentResp, AgentsListResp, CreateAgentReq, SlotParamsReq};
 use crate::error::ApiError;
-use crate::state::SharedState;
+use crate::state::{parse_id, strategy_slot_view, SharedState};
 
 fn parse_agent_id(raw: &str) -> Result<Uuid, ApiError> {
-    Uuid::parse_str(raw).map_err(|_| ApiError::BadRequest(format!("非法 Agent ID: {raw}")))
+    parse_id(raw, "Agent ID")
 }
 
 fn agent_view(agent: &Agent) -> AgentResp {
-    let kind = agent.kind;
-    let b = &agent.params.nnue_budget;
-    // 与 SlotView（策略槽位视图）同构：按策略种类下发生效参数摘要
-    let (budget_mode, nnue_depth, nnue_budget, nnue_time_ms, search_timeout_ms) = match kind {
-        StrategyKind::ExpectimaxNnue => (
-            Some(b.mode.as_str().to_string()),
-            (b.mode == crate::app::search::BudgetMode::DepthNodes).then_some(b.depth),
-            (b.mode != crate::app::search::BudgetMode::Time).then_some(b.nodes),
-            (b.mode == crate::app::search::BudgetMode::Time).then_some(b.time_ms),
-            Some(b.timeout_ms),
-        ),
-        StrategyKind::Expectimax => (
-            None,
-            None,
-            None,
-            None,
-            Some(agent.params.nnue_budget.timeout_ms),
-        ),
-        _ => (None, None, None, None, None),
-    };
     AgentResp {
         id: agent.id.to_string(),
         variant: agent.variant.as_str().to_string(),
-        slot: SlotView {
-            kind: kind.as_str().to_string(),
-            agent_id: None,
-            model_file: agent.model_file.clone(),
-            mcts_sims: kind.is_mcts().then_some(agent.params.mcts_sims),
-            engine_budget: (kind == StrategyKind::Expectimax).then_some(agent.params.engine_budget),
-            budget_mode,
-            nnue_depth,
-            nnue_budget,
-            nnue_time_ms,
-            search_timeout_ms,
-        },
+        // 与 SlotView（策略槽位视图）同构：按策略种类下发生效参数摘要（单一真源）
+        slot: strategy_slot_view(agent.kind, agent.model_file.clone(), agent.params),
     }
 }
 
