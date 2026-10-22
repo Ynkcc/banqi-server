@@ -21,11 +21,10 @@ use banqi_core::core::expectimax::rule_eval::RuleMaterialEval;
 use banqi_core::core::expectimax;
 use banqi_engine::engine::{CaptureFirstPolicy, Policy, RandomPolicy, RevealFirstPolicy};
 
+use crate::app::models::EngineKind;
 use crate::app::search::SearchBudget;
 
-// ============================================================================
 // 对手种类
-// ============================================================================
 
 /// 规则对手种类（轻量基线 / 陪练）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,20 +120,33 @@ impl OpponentKind {
     pub fn needs_model(self) -> bool {
         matches!(self, OpponentKind::Nnue | OpponentKind::MctsOnnx | OpponentKind::MctsDL)
     }
+
+    /// 模型类对手对应的推理后端（规则 / Engine 对手返回 None）。
+    /// 引擎字符串下发（`EngineKind::as_str`）与模型预加载均由此单点换算。
+    pub fn engine_kind(self) -> Option<EngineKind> {
+        match self {
+            OpponentKind::Nnue => Some(EngineKind::Nnue),
+            OpponentKind::MctsOnnx => Some(EngineKind::MctsOnnx),
+            OpponentKind::MctsDL => Some(EngineKind::MctsDL),
+            _ => None,
+        }
+    }
+
+    /// 由推理后端构造对应的模型类对手（传统路径推断 / 换绑模型时切换对手种类）。
+    pub fn from_engine_kind(engine: EngineKind) -> Self {
+        match engine {
+            EngineKind::Nnue => OpponentKind::Nnue,
+            EngineKind::MctsOnnx => OpponentKind::MctsOnnx,
+            EngineKind::MctsDL => OpponentKind::MctsDL,
+        }
+    }
 }
 
-// ============================================================================
 // 无模型对手的同步决策
-// ============================================================================
 
 /// 规则对手 / 纯计算引擎的同步决策：给定快照返回一个合法动作。
-///
-/// - 规则对手（Random / RevealFirst / CaptureFirst）：廉价，可直接同步调用
-///   （忽略 `budget`）；
-/// - Engine（Expectimax 强引擎）：计算量大，按 `budget` 的节点预算 + 硬超时
-///   约束搜索，异步调用方须放入 blocking 线程池执行；
-/// - 模型类对手不经此函数（见 [`crate::search`] 的 `nnue_search` /
-///   `mcts_search_onnx`）。
+/// 规则对手廉价，可直接同步调用（忽略 `budget`）；Engine 计算量大，
+/// 调用方须放入 blocking 线程池执行；模型类对手不经此函数。
 pub fn choose_simple(
     kind: SimpleKind,
     snap: &PositionSnapshot,
@@ -148,8 +160,7 @@ pub fn choose_simple(
             RuleKind::CaptureFirst => CaptureFirstPolicy::choose_action(&env),
         },
         SimpleKind::Engine => {
-            // 纯计算引擎：无模型。expectimax::search 强制要求叶评估器，
-            // 此处注入 core 的纯规则子力差基线（RuleMaterialEval）。
+            // 纯计算引擎：无模型，注入 core 的纯规则子力差基线叶评估器
             let mut cfg = budget.clamped().to_search_config();
             cfg.nnue_evaluator = Some(Arc::new(RuleMaterialEval::default()));
             expectimax::search(&env, &cfg).map(|r| r.action)
@@ -158,15 +169,9 @@ pub fn choose_simple(
     action.ok_or_else(|| "无合法动作".to_string())
 }
 
-// ============================================================================
 // 引擎参数快照（server /api/settings 的单一真源）
-// ============================================================================
 
-/// 引擎搜索参数快照：全量字段 + 钳制规则 + 部分更新语义的单一真源。
-///
-/// - 钳制规则统一为「必须 ≥ 1」（`SearchBudget.time_ms` 允许 0 = 仅超时控制）；
-/// - 部分更新（[`EngineParams::updated`]）只覆盖显式给出的字段，
-///   返回钳制后的生效快照。
+/// 引擎搜索参数快照：全量字段 + 钳制规则（必须 ≥ 1）+ 部分更新语义的单一真源。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EngineParams {
     /// Gumbel MCTS 模拟次数（MctsOnnx 对手 / 手动搜索）
@@ -219,9 +224,7 @@ impl Default for EngineParams {
     }
 }
 
-// ============================================================================
 // 测试
-// ============================================================================
 
 #[cfg(test)]
 mod tests {

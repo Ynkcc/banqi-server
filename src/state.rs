@@ -29,9 +29,7 @@ use crate::app::mcts_view::MctsTree;
 use banqi_core::core::env::DarkChessEnv;
 
 
-// ============================================================================
 // 模型池与推理后端分派：实现收敛到 banqi-app（单一真源），此处仅别名/re-export
-// ============================================================================
 
 pub use crate::app::models::EngineKind;
 
@@ -39,9 +37,7 @@ pub use crate::app::models::EngineKind;
 /// 按文件路径随用随加载并**常驻缓存**，供所有对局复用。
 pub type Models = crate::app::models::ModelPool;
 
-// ============================================================================
 // 对局会话
-// ============================================================================
 
 /// 对手配置（PvP 时 `GameSession.opponent` 为 None）。
 #[derive(Clone, Copy, Debug)]
@@ -73,6 +69,9 @@ pub struct GameSession {
     pub model_file: Option<String>,
     /// 最近一次 MCTS 搜索保留的树（对手回合或手动搜索时替换；仅查询用）
     pub mcts_tree: Option<crate::mcts::MctsTreeBox>,
+    /// 最近一次 Expectimax+NNUE 搜索保留的轨迹树（NNUE 对手回合或手动搜索时
+    /// 替换；仅查询用，不做跨回合复用）
+    pub expectimax_tree: Option<crate::app::expectimax_view::ExpectimaxTree>,
 }
 
 impl GameSession {
@@ -86,6 +85,7 @@ impl GameSession {
             opponent,
             model_file,
             mcts_tree: None,
+            expectimax_tree: None,
         }
     }
 
@@ -101,6 +101,7 @@ impl GameSession {
             opponent,
             model_file,
             mcts_tree: None,
+            expectimax_tree: None,
         }
     }
 
@@ -123,9 +124,7 @@ impl GameSession {
     }
 
     /// 悔棋到当前行棋方上次行动前：回退快照直至回到「当前行棋方即将行动」的局面。
-    ///
-    /// AI 对局中（AI 走完后轮到人类）会一并回退 AI 与人类各一步；
-    /// PvP 中即回退最近一步。当前玩家尚未行动过时返回错误。
+    /// AI 对局中会一并回退 AI 与人类各一步；当前玩家尚未行动过时返回错误。
     pub fn undo_to_current_player(&mut self) -> Result<(), ApiError> {
         self.core.undo_to_current_player().map_err(ApiError::from)
     }
@@ -164,10 +163,8 @@ impl GameSession {
         self.core.undoable()
     }
 
-    /// 取出会话保留的上一棵搜索树并还原为具体类型（树复用用）。
-    ///
-    /// 搜索树由 `choose_blocking` / `choose_torch_blocking` 以 `DarkChessEnv`
-    /// 实例化（所有变体通用），还原恒成功；非搜索来源的树返回 None。
+    /// 取出会话保留的上一棵搜索树并还原为具体类型（树复用用）；
+    /// 搜索树以 `DarkChessEnv` 实例化（所有变体通用），还原恒成功。
     pub fn take_reusable_mcts_tree(&mut self) -> Option<MctsTree<DarkChessEnv>> {
         let tree = self.mcts_tree.take()?;
         tree.into_any()
@@ -290,9 +287,7 @@ impl GameSession {
     }
 }
 
-// ============================================================================
 // 应用状态
-// ============================================================================
 
 /// axum 共享状态。
 pub struct AppState {
@@ -309,6 +304,42 @@ pub struct AppState {
 
 /// 路由层共享的 `Arc<AppState>` 别名（统一在此定义，避免各 handler 重复声明）。
 pub type SharedState = std::sync::Arc<AppState>;
+
+// ============================================================================
+// 路由层公共辅助：对局 ID 解析 / 会话存取 / 搜索树读取（api 各文件共用）
+// ============================================================================
+
+/// 解析路径中的对局 ID（非法时 400）。
+pub fn parse_game_id(raw: &str) -> Result<Uuid, ApiError> {
+    Uuid::parse_str(raw).map_err(|_| ApiError::BadRequest(format!("非法对局 ID: {raw}")))
+}
+
+/// 从对局表读取会话（不存在时 404；`label` 用于错误消息，通常为路径原始 ID）。
+pub fn get_session<'a>(
+    games: &'a HashMap<Uuid, GameSession>,
+    label: &str,
+    game_id: Uuid,
+) -> Result<&'a GameSession, ApiError> {
+    games
+        .get(&game_id)
+        .ok_or_else(|| ApiError::GameNotFound(label.to_string()))
+}
+
+/// [`get_session`] 的可变版本（走子 / 悔棋 / 换绑等写路径共用）。
+pub fn get_mut_session<'a>(
+    games: &'a mut HashMap<Uuid, GameSession>,
+    label: &str,
+    game_id: Uuid,
+) -> Result<&'a mut GameSession, ApiError> {
+    games
+        .get_mut(&game_id)
+        .ok_or_else(|| ApiError::GameNotFound(label.to_string()))
+}
+
+/// 取会话保留的 MCTS 搜索树（无树时 404 MCTS_TREE_MISSING；mcts 查询端点共用）。
+pub fn mcts_tree_of(s: &GameSession) -> Result<&dyn crate::mcts::MctsTreeView, ApiError> {
+    s.mcts_tree.as_deref().ok_or(ApiError::MctsTreeMissing)
+}
 
 impl AppState {
     pub fn new(config: ServerConfig) -> Self {
@@ -397,6 +428,19 @@ impl AppState {
         self.config.default_variant.unwrap_or(Variant::ALL[0])
     }
 
+    /// 由请求可空的模型文件字段解析实际绑定的模型文件：空串视为未指定；
+    /// 未指定时按变体 ID 自动匹配唯一候选（建局 / engine 查询共用）。
+    pub fn resolve_model_file(
+        &self,
+        model_file: Option<&str>,
+        variant: Variant,
+    ) -> Result<String, ApiError> {
+        match model_file.map(str::trim).filter(|s| !s.is_empty()) {
+            Some(f) => Ok(f.to_string()),
+            None => self.auto_match_model(variant),
+        }
+    }
+
     /// 未显式指定模型时的自动匹配：文件名主干 == 变体 ID 的唯一候选
     /// （`.onnx` / `.nnue` 均参与；模型目录约定 `<variant_id>.onnx|.nnue`）。
     pub fn auto_match_model(&self, variant: Variant) -> Result<String, ApiError> {
@@ -424,9 +468,8 @@ impl AppState {
         }
     }
 
-    /// 随用随加载：按对局绑定的模型文件取 ONNX 模型（缓存命中直接返回，
-    /// 首次使用时加载权重）。加载（构建 ort 会话）在 blocking 线程池执行，
-    /// 避免阻塞异步运行时；加载后常驻缓存，供所有对局复用。
+    /// 随用随加载：按对局绑定的模型文件取 ONNX 模型；加载在 blocking 线程池执行，
+    /// 加载后常驻缓存供所有对局复用。
     #[cfg(feature = "onnx")]
     pub async fn acquire_model(self: &Arc<Self>, model_file: String) -> Result<Arc<banqi_engine::inference::onnx::OnnxModel>, String> {
         let app = Arc::clone(self);
@@ -474,11 +517,72 @@ impl AppState {
         .await
         .map_err(|e| format!("模型加载任务失败: {e}"))?
     }
+
+    /// 按推理后端预加载并校验模型（建局 / 换绑共用的单一真源：原
+    /// `build_opponent` 与 `bind_model` 两处按后端 cfg 门控的「加载 +
+    /// NNUE 布局校验」序列收敛于此）。坏文件 / 跨变体权重在此报错而非对局中途。
+    pub async fn preload_engine_model(
+        self: &Arc<Self>,
+        engine: EngineKind,
+        model_file: String,
+        variant: Variant,
+    ) -> Result<(), ApiError> {
+        match engine {
+            EngineKind::Nnue => {
+                let evaluator = self
+                    .acquire_nnue_model(model_file.clone())
+                    .await
+                    .map_err(|e| {
+                        ApiError::ModelUnavailable(format!("模型 {model_file} 加载失败: {e}"))
+                    })?;
+                evaluator.validate_layout(&variant.config()).map_err(|e| {
+                    ApiError::ModelUnavailable(format!(
+                        ".nnue 权重与变体 {} 不匹配: {e}",
+                        variant.as_str()
+                    ))
+                })
+            }
+            EngineKind::MctsOnnx => {
+                #[cfg(feature = "onnx")]
+                {
+                    self.acquire_model(model_file.clone()).await.map_err(|e| {
+                        ApiError::ModelUnavailable(format!("模型 {model_file} 加载失败: {e}"))
+                    })?;
+                    Ok(())
+                }
+                #[cfg(not(feature = "onnx"))]
+                {
+                    let _ = model_file;
+                    Err(ApiError::ModelUnavailable(
+                        "服务编译未启用 onnx 推理，MCTS+ONNX 路径不可用（可改用 .nnue / .pt 模型）"
+                            .into(),
+                    ))
+                }
+            }
+            EngineKind::MctsDL => {
+                #[cfg(feature = "torch")]
+                {
+                    self.acquire_torch_model(model_file.clone())
+                        .await
+                        .map_err(|e| {
+                            ApiError::ModelUnavailable(format!("模型 {model_file} 加载失败: {e}"))
+                        })?;
+                    Ok(())
+                }
+                #[cfg(not(feature = "torch"))]
+                {
+                    let _ = model_file;
+                    Err(ApiError::ModelUnavailable(
+                        "服务编译未启用 torch 推理，MCTS+DL 路径不可用（可改用 .onnx / .nnue 模型）"
+                            .into(),
+                    ))
+                }
+            }
+        }
+    }
 }
 
-// ============================================================================
 // 测试
-// ============================================================================
 
 #[cfg(test)]
 mod tests {

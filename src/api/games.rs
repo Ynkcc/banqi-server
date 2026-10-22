@@ -12,19 +12,16 @@ use banqi_core::core::env::types::Player;
 use banqi_core::core::env::PositionSnapshot;
 
 use crate::ai;
-use crate::config::parse_variant;
+use crate::api::parse_variant_or_err;
 use crate::dto::{
     AppliedAction, CreateGameReq, GameCreatedResp, GameListResp, GameStateResp, GameSummary,
     ModelBindReq, MoveActionResp, MoveReq, MoveResp, OpponentResp, UndoReq, player_str,
-    winner_code,
 };
 use crate::error::ApiError;
-use crate::state::{EngineKind, GameSession, OpponentConfig, SharedState};
-
-/// 解析路径中的对局 ID。
-fn parse_game_id(raw: &str) -> Result<Uuid, ApiError> {
-    Uuid::parse_str(raw).map_err(|_| ApiError::BadRequest(format!("非法对局 ID: {raw}")))
-}
+use crate::state::{
+    get_mut_session, get_session, parse_game_id, EngineKind, GameSession, OpponentConfig,
+    SharedState,
+};
 
 /// 解析 AI 执子方（"auto" = AI 执黑，人类执红先行）。
 fn parse_ai_player(s: Option<&str>) -> Result<Player, ApiError> {
@@ -39,55 +36,24 @@ fn parse_ai_player(s: Option<&str>) -> Result<Player, ApiError> {
 }
 
 /// 按对手种类构建配置：模型类对手在此解析并预加载绑定模型（坏文件即报错）；
-/// 规则 / Engine 对手无模型。返回 `(对手配置, 绑定的模型文件)`。
+/// 规则 / Engine 对手无模型。`model_file` 为调用方已解析的绑定模型文件
+/// （None = 内部按请求字段 + 服务器默认值解析）。返回 `(对手配置, 绑定的模型文件)`。
 async fn build_opponent(
     app: &SharedState,
     kind: OpponentKind,
     req: &CreateGameReq,
     variant: banqi_core::core::env::Variant,
+    model_file: Option<String>,
 ) -> Result<(OpponentConfig, Option<String>), ApiError> {
     let model_file = if kind.needs_model() {
-        let f = match req.model_file.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-            Some(f) => f.to_string(),
-            None => app.auto_match_model(variant)?,
+        let f = match model_file {
+            Some(f) => f,
+            None => app.resolve_model_file(req.model_file.as_deref(), variant)?,
         };
-        match kind {
-            OpponentKind::Nnue => {
-                // 建局即加载 + 布局校验：坏模型 / 跨变体权重在建局时报错而非对局中途
-                app.acquire_nnue_validated(f.clone(), variant)
-                    .await
-                    .map_err(|e| ApiError::ModelUnavailable(format!("模型加载失败: {e}")))?;
-            }
-            OpponentKind::MctsOnnx => {
-                #[cfg(feature = "onnx")]
-                app.acquire_model(f.clone())
-                    .await
-                    .map_err(|e| ApiError::ModelUnavailable(format!("模型加载失败: {e}")))?;
-                #[cfg(not(feature = "onnx"))]
-                {
-                    let _ = f;
-                    return Err(ApiError::ModelUnavailable(
-                        "服务编译未启用 onnx 推理，MCTS+ONNX 对手不可用（请选择 .nnue 模型）".into(),
-                    ));
-                }
-            }
-            OpponentKind::MctsDL => {
-                #[cfg(feature = "torch")]
-                app.acquire_torch_model(f.clone())
-                    .await
-                    .map_err(|e| ApiError::ModelUnavailable(format!("模型加载失败: {e}")))?;
-                #[cfg(not(feature = "torch"))]
-                {
-                    let _ = f;
-                    return Err(ApiError::ModelUnavailable(
-                        "服务编译未启用 torch 推理，MCTS+DL 对手不可用（请选择 .onnx / .nnue 模型）"
-                            .into(),
-                    ));
-                }
-            }
-            // needs_model() 已排除
-            _ => unreachable!("规则 / Engine 对手不需要模型"),
-        }
+        // 建局即加载 + 布局校验：坏模型 / 跨变体权重在建局时报错而非对局中途
+        // （按后端预加载 + NNUE 布局校验收敛于 AppState::preload_engine_model）
+        let engine = kind.engine_kind().expect("needs_model() 蕴含模型类对手");
+        app.preload_engine_model(engine, f.clone(), variant).await?;
         Some(f)
     } else {
         None
@@ -114,9 +80,7 @@ async fn build_opponent(
     ))
 }
 
-// ============================================================================
 // 创建 / 列表 / 查询 / 删除
-// ============================================================================
 
 /// POST /api/games
 pub async fn create_game(
@@ -131,13 +95,7 @@ pub async fn create_game(
                 ApiError::BadRequest(format!("BFEN 局面解析失败: {e}"))
             })?;
             if let Some(s) = req.variant.as_deref() {
-                let want = parse_variant(s).ok_or_else(|| {
-                    use banqi_core::core::env::Variant;
-                    ApiError::BadRequest(format!(
-                        "未知变体: {s}（可用: {}）",
-                        Variant::ALL.iter().map(|v| v.as_str()).collect::<Vec<_>>().join(", ")
-                    ))
-                })?;
+                let want = parse_variant_or_err(s)?;
                 if want != snap.variant {
                     return Err(ApiError::BadRequest(format!(
                         "BFEN 变体（{}）与请求变体（{}）不一致",
@@ -156,13 +114,7 @@ pub async fn create_game(
         Some(s) => s.variant,
         None => match req.variant.as_deref() {
             None => app.default_variant(),
-            Some(s) => parse_variant(s).ok_or_else(|| {
-                use banqi_core::core::env::Variant;
-                ApiError::BadRequest(format!(
-                    "未知变体: {s}（可用: {}）",
-                    Variant::ALL.iter().map(|v| v.as_str()).collect::<Vec<_>>().join(", ")
-                ))
-            })?,
+            Some(s) => parse_variant_or_err(s)?,
         },
     };
 
@@ -184,23 +136,16 @@ pub async fn create_game(
                     "非法 opponent: {s}（可选 PvP / Random / RevealFirst / CaptureFirst / Engine / Nnue / MctsOnnx / MctsDL）"
                 ))
             })?;
-            let (opp, model) = build_opponent(&app, kind, &req, variant).await?;
+            let (opp, model) = build_opponent(&app, kind, &req, variant, None).await?;
             (Some(opp), model)
         }
         None => {
             if req.ai_enabled.unwrap_or(true) {
                 // 传统路径：模型文件决定推理后端（`.nnue` → Nnue，`.pt` → MctsDL，
-                // 其余 → MctsOnnx）
-                let model_file = match req.model_file.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-                    Some(f) => f.to_string(),
-                    None => app.auto_match_model(variant)?,
-                };
-                let kind = match EngineKind::from_model_file(&model_file) {
-                    EngineKind::Nnue => OpponentKind::Nnue,
-                    EngineKind::MctsOnnx => OpponentKind::MctsOnnx,
-                    EngineKind::MctsDL => OpponentKind::MctsDL,
-                };
-                let (opp, model) = build_opponent(&app, kind, &req, variant).await?;
+                // 其余 → MctsOnnx）；解析结果直接传入 build_opponent，不重复解析
+                let model_file = app.resolve_model_file(req.model_file.as_deref(), variant)?;
+                let kind = OpponentKind::from_engine_kind(EngineKind::from_model_file(&model_file));
+                let (opp, model) = build_opponent(&app, kind, &req, variant, Some(model_file)).await?;
                 (Some(opp), model)
             } else {
                 (None, None)
@@ -249,9 +194,7 @@ pub async fn get_game(
 ) -> Result<Json<GameStateResp>, ApiError> {
     let game_id = parse_game_id(&id)?;
     let games = read_lock(&app.games);
-    let s = games
-        .get(&game_id)
-        .ok_or_else(|| ApiError::GameNotFound(id.clone()))?;
+    let s = get_session(&games, &id, game_id)?;
     Ok(Json(s.view(game_id)))
 }
 
@@ -270,13 +213,9 @@ pub async fn delete_game(
     }
 }
 
-// ============================================================================
 // 走子 / 悔棋 / AI 走子
-// ============================================================================
 
-/// POST /api/games/:id/move
-///
-/// 人类走子一步；若启用 AI 且轮到 AI，自动执行 AI 回合并一并返回。
+/// POST /api/games/:id/move：人类走子一步；若启用 AI 且轮到 AI，自动执行 AI 回合。
 pub async fn move_piece(
     State(app): State<SharedState>,
     Path(id): Path<String>,
@@ -287,12 +226,9 @@ pub async fn move_piece(
     // 锁 1：人类走子（同步操作，立即释放，不跨 await）
     let (mut state, mover, human_view, ai_version) = {
         let mut games = write_lock(&app.games);
-        let s = games
-            .get_mut(&game_id)
-            .ok_or_else(|| ApiError::GameNotFound(id.clone()))?;
+        let s = get_mut_session(&mut games, &id, game_id)?;
         let mover = s.core.current.current_player;
-        // 先走子（内部校验合法性/终局），再生成动作视图——
-        // 非法动作直接 4xx，避免用越界 action 去查环境（core 内按索引访问会 panic）
+        // 先走子（内部校验合法性/终局），避免用越界 action 查环境导致 panic
         let outcome = s.apply_action(req.action)?;
         let human_view = s.action_view(req.action);
         tracing::info!(
@@ -332,15 +268,7 @@ pub async fn move_piece(
         }
     }
 
-    Ok(Json(MoveResp {
-        terminated: state.terminated,
-        truncated: state.truncated,
-        winner: winner_code(state.winner.as_deref()),
-        state,
-        actions,
-        mcts_stats,
-        nnue_stats,
-    }))
+    Ok(Json(MoveResp::new(state, actions, mcts_stats, nnue_stats)))
 }
 
 /// POST /api/games/:id/ai-move
@@ -355,22 +283,14 @@ pub async fn ai_move(
     // 锁 1：读取当前版本号（立即释放）
     let version = {
         let games = read_lock(&app.games);
-        let s = games
-            .get(&game_id)
-            .ok_or_else(|| ApiError::GameNotFound(id.clone()))?;
+        let s = get_session(&games, &id, game_id)?;
         s.core.version
     };
 
     match ai::run_opponent_turn(&app, game_id, version).await? {
-        Some((state, ai_action, mcts_stats, nnue_stats)) => Ok(Json(MoveResp {
-            terminated: state.terminated,
-            truncated: state.truncated,
-            winner: winner_code(state.winner.as_deref()),
-            state,
-            actions: vec![ai_action],
-            mcts_stats,
-            nnue_stats,
-        })),
+        Some((state, ai_action, mcts_stats, nnue_stats)) => {
+            Ok(Json(MoveResp::new(state, vec![ai_action], mcts_stats, nnue_stats)))
+        }
         None => Err(ApiError::BadRequest(
             "AI 结果作废（期间对局被并发修改），请重试".to_string(),
         )),
@@ -393,87 +313,38 @@ pub async fn bind_model(
     // 锁 1：校验已启用对手并取出变体（NNUE 布局校验用，立即释放）
     let variant = {
         let games = read_lock(&app.games);
-        let s = games
-            .get(&game_id)
-            .ok_or_else(|| ApiError::GameNotFound(id.clone()))?;
+        let s = get_session(&games, &id, game_id)?;
         s.opponent.as_ref().ok_or(ApiError::AiDisabled)?;
         s.core.variant
     };
 
-    // 锁外预加载（blocking 线程池，可能耗时；坏文件在此报错）
-    match engine {
-        EngineKind::Nnue => {
-            let evaluator = app
-                .acquire_nnue_model(req.model_file.clone())
-                .await
-                .map_err(|e| {
-                    ApiError::ModelUnavailable(format!("模型 {} 绑定失败: {e}", req.model_file))
-                })?;
-            evaluator.validate_layout(&variant.config()).map_err(|e| {
-                ApiError::ModelUnavailable(format!(".nnue 权重与变体 {} 不匹配: {e}", variant.as_str()))
-            })?;
-        }
-        EngineKind::MctsOnnx => {
-            #[cfg(feature = "onnx")]
-            app.acquire_model(req.model_file.clone())
-                .await
-                .map_err(|e| {
-                    ApiError::ModelUnavailable(format!("模型 {} 绑定失败: {e}", req.model_file))
-                })?;
-            #[cfg(not(feature = "onnx"))]
-            return Err(ApiError::ModelUnavailable(
-                "服务编译未启用 onnx 推理，MCTS+ONNX 模型不可用（请绑定 .nnue 模型）".into(),
-            ));
-        }
-        EngineKind::MctsDL => {
-            #[cfg(feature = "torch")]
-            app.acquire_torch_model(req.model_file.clone())
-                .await
-                .map_err(|e| {
-                    ApiError::ModelUnavailable(format!("模型 {} 绑定失败: {e}", req.model_file))
-                })?;
-            #[cfg(not(feature = "torch"))]
-            return Err(ApiError::ModelUnavailable(
-                "服务编译未启用 torch 推理，TorchScript (.pt) 模型不可用（请绑定 .onnx / .nnue 模型）"
-                    .into(),
-            ));
-        }
-    }
+    // 锁外预加载（blocking 线程池，可能耗时；坏文件在此报错；
+    // 按后端分派 + NNUE 布局校验收敛于 AppState::preload_engine_model）
+    app.preload_engine_model(engine, req.model_file.clone(), variant)
+        .await?;
 
     // 锁 2：写入绑定（换绑模型时同步切换对手种类：PvP 之外的规则 / Engine
     // 对手在绑定模型后转为对应的模型类对手）
     let mut games = write_lock(&app.games);
-    let s = games
-        .get_mut(&game_id)
-        .ok_or_else(|| ApiError::GameNotFound(id.clone()))?;
+    let s = get_mut_session(&mut games, &id, game_id)?;
     s.model_file = Some(req.model_file.clone());
     if let Some(opp) = s.opponent.as_mut() {
-        opp.kind = match engine {
-            EngineKind::Nnue => OpponentKind::Nnue,
-            EngineKind::MctsOnnx => OpponentKind::MctsOnnx,
-            EngineKind::MctsDL => OpponentKind::MctsDL,
-        };
+        opp.kind = OpponentKind::from_engine_kind(engine);
     }
     tracing::info!(game = %game_id, engine = ?engine, "对局重绑模型: {}", req.model_file);
     Ok(Json(s.view(game_id)))
 }
 
-// ============================================================================
-// 对手查询 / 坐标→动作（对齐 banqi-gui get_opponent_type / get_move_action）
-// ============================================================================
+// 对手查询 / 坐标→动作
 
-/// GET /api/games/:id/opponent
-///
-/// 当前对局的对手种类（PvP 对局返回 "PvP"；对应 gui `get_opponent_type`）。
+/// GET /api/games/:id/opponent：当前对局的对手种类（PvP 对局返回 "PvP"）。
 pub async fn get_opponent(
     State(app): State<SharedState>,
     Path(id): Path<String>,
 ) -> Result<Json<OpponentResp>, ApiError> {
     let game_id = parse_game_id(&id)?;
     let games = read_lock(&app.games);
-    let s = games
-        .get(&game_id)
-        .ok_or_else(|| ApiError::GameNotFound(id.clone()))?;
+    let s = get_session(&games, &id, game_id)?;
     let opponent = s
         .opponent
         .map(|o| o.kind.as_str().to_string())
@@ -481,10 +352,8 @@ pub async fn get_opponent(
     Ok(Json(OpponentResp { opponent }))
 }
 
-/// GET /api/games/:id/move-action?from=12&to=13
-///
-/// 坐标对 → 动作空间索引（几何映射，只取决于变体；`null` = 坐标不构成任何动作；
-/// 对应 gui `get_move_action`，内部为 O(1) 查表）。
+/// GET /api/games/:id/move-action?from=12&to=13：坐标对 → 动作空间索引
+/// （几何映射，只取决于变体；`null` = 坐标不构成任何动作）。
 #[derive(Debug, Deserialize)]
 pub struct MoveActionQuery {
     from: usize,
@@ -500,9 +369,7 @@ pub async fn move_action(
 
     let game_id = parse_game_id(&id)?;
     let games = read_lock(&app.games);
-    let s = games
-        .get(&game_id)
-        .ok_or_else(|| ApiError::GameNotFound(id.clone()))?;
+    let s = get_session(&games, &id, game_id)?;
     let total = {
         let cfg = s.core.variant.config();
         cfg.rows * cfg.cols
@@ -515,9 +382,7 @@ pub async fn move_action(
             s.core.variant.as_str()
         )));
     }
-    // 几何映射只取决于变体 config（动作查找表按 config 全局缓存）：
-    // from == to → 翻棋单格动作（single_to_action）；否则坐标对查
-    // `DarkChessEnv::get_action_for_coords`（O(1)，覆盖移动 / 炮击）
+    // 几何映射只取决于变体 config：from == to → 翻棋单格动作，否则查移动/炮击
     let action = if q.from == q.to {
         let tables =
             banqi_core::core::env::actions::action_lookup_tables(&s.core.variant.config());
@@ -540,9 +405,7 @@ pub async fn undo(
     let game_id = parse_game_id(&id)?;
 
     let mut games = write_lock(&app.games);
-    let s = games
-        .get_mut(&game_id)
-        .ok_or_else(|| ApiError::GameNotFound(id.clone()))?;
+    let s = get_mut_session(&mut games, &id, game_id)?;
     // 缺省语义：回退到当前行棋方上次行动前（AI 对局中自动含 AI 回合）
     match req.steps {
         Some(steps) => {
@@ -555,14 +418,5 @@ pub async fn undo(
         }
     }
     // 返回 StepResult 形状（与走子 / AI 回合一致），actions 为空（无悔棋动作）
-    let state = s.view(game_id);
-    Ok(Json(MoveResp {
-        terminated: state.terminated,
-        truncated: state.truncated,
-        winner: winner_code(state.winner.as_deref()),
-        state,
-        actions: Vec::new(),
-        mcts_stats: None,
-        nnue_stats: None,
-    }))
+    Ok(Json(MoveResp::new(s.view(game_id), Vec::new(), None, None)))
 }

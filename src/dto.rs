@@ -2,9 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-// ============================================================================
 // 请求
-// ============================================================================
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -13,10 +11,8 @@ pub struct CreateGameReq {
     #[serde(default)]
     pub variant: Option<String>,
     /// 对手类型："PvP"（本地双人）/ "Random" / "RevealFirst" / "CaptureFirst" /
-    /// "Engine"（纯计算强引擎）/ "Nnue" / "MctsOnnx"。
-    /// 显式给出时优先生效；缺省时按传统语义回退：
-    /// `aiEnabled=false` → PvP，`aiEnabled=true`（默认）→ 由绑定模型文件决定
-    /// （`.nnue` → Nnue，其余 → MctsOnnx）。
+    /// "Engine"（纯计算强引擎）/ "Nnue" / "MctsOnnx"。显式给出时优先生效；
+    /// 缺省时按传统语义回退（aiEnabled=false → PvP，否则由模型文件扩展名决定）。
     #[serde(default)]
     pub opponent: Option<String>,
     /// 是否启用 AI 对手（仅 `opponent` 缺省时的传统语义；默认 true）
@@ -43,10 +39,8 @@ pub struct CreateGameReq {
     /// 缺省时取服务器当前默认值（60s）。
     #[serde(default)]
     pub search_timeout_ms: Option<u64>,
-    /// 显式绑定的模型文件（用户从 /api/health 模型清单中选择；须在模型目录内）。
-    /// 仅模型类对手（Nnue / MctsOnnx）需要；缺省自动匹配；同变体存在多个候选
-    /// 模型时自动匹配报歧义错误，必须显式指定。
-    /// 推理后端由扩展名决定：`.nnue` → Expectimax+NNUE，其余 → MCTS+ONNX。
+    /// 显式绑定的模型文件（须在模型目录内）。仅模型类对手需要；缺省自动匹配，
+    /// 同变体多候选时报歧义错误。推理后端由扩展名决定（`.nnue` → NNUE，其余 → ONNX）。
     #[serde(default)]
     pub model_file: Option<String>,
     /// NNUE 搜索深度（仅 `.nnue` 模型生效）；缺省时取服务器当前默认值。
@@ -55,8 +49,7 @@ pub struct CreateGameReq {
     /// NNUE 节点预算（仅 `.nnue` 模型生效）；缺省时取服务器当前默认值。
     #[serde(default)]
     pub nnue_budget: Option<u64>,
-    /// BFEN 局面串：提供时由该局面重建对局（变体以 BFEN 自带标识为准，
-    /// 与 `variant` 同时给出时须一致；走子历史从空开始）。
+    /// BFEN 局面串：提供时由该局面重建对局（变体以 BFEN 自带标识为准）。
     #[serde(default)]
     pub fen: Option<String>,
 }
@@ -143,9 +136,7 @@ pub struct EngineMoveReq {
     pub model_file: Option<String>,
 }
 
-// ============================================================================
 // 响应
-// ============================================================================
 
 #[derive(Debug, Serialize)]
 pub struct ActionView {
@@ -193,12 +184,8 @@ pub struct AiInfoView {
     pub search_timeout_ms: Option<u64>,
 }
 
-/// GET /api/games/:id 响应：前端 `GameState`（types.ts，snake_case）为基座
-/// 的完整状态 + server 专属扩展字段。
-///
-/// `game`（flatten 展开）= [`crate::app::view::GameStateView`]：棋盘短码、
-/// 阵亡/隐藏全名、动作掩码、位板、BFEN 等，前端零适配直传；扩展字段为
-/// server 资源模型专属（对局 ID / 版本号 / 合法动作 / 对手信息等）。
+/// GET /api/games/:id 响应：前端 `GameState`（types.ts）为基座的完整状态
+/// + server 专属扩展字段（对局 ID / 版本号 / 合法动作 / 对手信息等）。
 #[derive(Debug, Serialize)]
 pub struct GameStateResp {
     /// 前端 GameState 全量字段（flatten 展开为顶层）
@@ -336,6 +323,30 @@ pub struct MoveResp {
     pub nnue_stats: Option<NnueStatsDto>,
 }
 
+impl MoveResp {
+    /// 由状态视图组装响应：`terminated` / `truncated` / `winner` 均取自 `state`
+    /// （走子 / 强制 AI / 悔棋三个 handler 共用，避免逐字段重复组装）。
+    pub fn new(
+        state: GameStateResp,
+        actions: Vec<AppliedAction>,
+        mcts_stats: Option<MctsStatsDto>,
+        nnue_stats: Option<NnueStatsDto>,
+    ) -> Self {
+        let terminated = state.terminated;
+        let truncated = state.truncated;
+        let winner = winner_code(state.winner.as_deref());
+        Self {
+            state,
+            terminated,
+            truncated,
+            winner,
+            actions,
+            mcts_stats,
+            nnue_stats,
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct GameSummary {
     pub game_id: String,
@@ -395,6 +406,20 @@ pub struct SettingsResp {
     pub nnue_time_ms: u64,
     /// 当前默认搜索硬超时毫秒（全模式必选生效）
     pub search_timeout_ms: u64,
+}
+
+impl From<crate::app::opponent::EngineParams> for SettingsResp {
+    fn from(p: crate::app::opponent::EngineParams) -> Self {
+        Self {
+            mcts_sims: p.mcts_sims,
+            engine_budget: p.engine_budget,
+            nnue_budget_mode: p.nnue_budget.mode.as_str().to_string(),
+            nnue_depth: p.nnue_budget.depth,
+            nnue_budget: p.nnue_budget.nodes,
+            nnue_time_ms: p.nnue_budget.time_ms,
+            search_timeout_ms: p.nnue_budget.timeout_ms,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -485,9 +510,7 @@ pub struct MoveActionResp {
     pub action: Option<usize>,
 }
 
-// ============================================================================
 // 序列化辅助
-// ============================================================================
 
 pub fn player_str(p: banqi_core::core::env::types::Player) -> String {
     match p {

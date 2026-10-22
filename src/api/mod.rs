@@ -3,6 +3,7 @@
 pub mod engine;
 pub mod games;
 pub mod mcts;
+pub mod nnue;
 
 use axum::extract::State;
 use axum::routing::{get, post, put};
@@ -33,6 +34,11 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/games/{id}/mcts/node/{node}", get(mcts::detail))
         .route("/api/games/{id}/mcts/node/{node}/children", get(mcts::children))
         .route("/api/games/{id}/mcts/node/{node}/board", get(mcts::board))
+        .route("/api/games/{id}/nnue/root", get(nnue::root))
+        .route("/api/games/{id}/nnue/search", post(nnue::search))
+        .route("/api/games/{id}/nnue/node/{node}", get(nnue::detail))
+        .route("/api/games/{id}/nnue/node/{node}/children", get(nnue::children))
+        .route("/api/games/{id}/nnue/node/{node}/board", get(nnue::board))
         .route("/api/health", get(health))
         .route("/api/variants", get(variants))
         .route("/api/settings", get(get_settings).put(put_settings))
@@ -43,6 +49,17 @@ pub fn router(state: SharedState) -> Router {
         .with_state(state)
         // 内嵌前端：/api 之外的所有路径走静态资源 + SPA fallback
         .fallback(web::handler)
+}
+
+/// 解析请求中的变体字符串（非法时 400，错误消息列出全部可用变体；
+/// BFEN 一致性校验与 variant 字段解析共用）。
+pub fn parse_variant_or_err(s: &str) -> Result<Variant, ApiError> {
+    crate::config::parse_variant(s).ok_or_else(|| {
+        ApiError::BadRequest(format!(
+            "未知变体: {s}（可用: {}）",
+            Variant::ALL.iter().map(|v| v.as_str()).collect::<Vec<_>>().join(", ")
+        ))
+    })
 }
 
 /// GET /api/health：健康检查（含扫描到的模型文件与加载状态）。
@@ -118,16 +135,7 @@ async fn variants() -> Json<VariantsResp> {
 /// GET /api/settings：读取运行时可调的服务端设置（默认 MCTS 搜索预算 /
 /// 强引擎节点预算 / NNUE 搜索预算：模式 + 节点/深度/时间 + 硬超时）。
 async fn get_settings(State(app): State<SharedState>) -> Json<SettingsResp> {
-    let p = app.params();
-    Json(SettingsResp {
-        mcts_sims: p.mcts_sims,
-        engine_budget: p.engine_budget,
-        nnue_budget_mode: p.nnue_budget.mode.as_str().to_string(),
-        nnue_depth: p.nnue_budget.depth,
-        nnue_budget: p.nnue_budget.nodes,
-        nnue_time_ms: p.nnue_budget.time_ms,
-        search_timeout_ms: p.nnue_budget.timeout_ms,
-    })
+    Json(app.params().into())
 }
 
 /// PUT /api/settings：运行时调整默认引擎参数（进行中的「跟随默认」对局实时同步；
@@ -154,13 +162,5 @@ async fn put_settings(
         p.nnue_budget.time_ms,
         p.nnue_budget.timeout_ms
     );
-    Ok(Json(SettingsResp {
-        mcts_sims: p.mcts_sims,
-        engine_budget: p.engine_budget,
-        nnue_budget_mode: p.nnue_budget.mode.as_str().to_string(),
-        nnue_depth: p.nnue_budget.depth,
-        nnue_budget: p.nnue_budget.nodes,
-        nnue_time_ms: p.nnue_budget.time_ms,
-        search_timeout_ms: p.nnue_budget.timeout_ms,
-    }))
+    Ok(Json(p.into()))
 }

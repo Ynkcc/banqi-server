@@ -10,7 +10,8 @@ use axum::Json;
 
 use banqi_core::core::env::PositionSnapshot;
 
-use crate::dto::{EngineMoveReq, EngineMoveResp, NnueStatsDto};
+use crate::ai::{choose_mcts_by_engine, choose_nnue_blocking};
+use crate::dto::{EngineMoveReq, EngineMoveResp, MctsStatsDto};
 use crate::error::ApiError;
 use crate::state::{EngineKind, GameSession, SharedState};
 
@@ -39,14 +40,13 @@ pub async fn engine_move(
         return Err(ApiError::GameOver);
     }
 
-    let model_file = match req.model_file.as_deref().map(str::trim) {
-        Some(f) if !f.is_empty() => f.to_string(),
-        _ => app.auto_match_model(variant)?,
-    };
+    let model_file = app.resolve_model_file(req.model_file.as_deref(), variant)?;
     let engine = EngineKind::from_model_file(&model_file);
     let view_of = |action: usize| session.action_view(action);
     let is_flip = |action: usize| action < variant.config().reveal_actions_count;
 
+    // 搜索执行：Nnue 走 Expectimax（本地），MCTS 类后端经
+    // choose_mcts_by_engine 单点调度（feature 门控与报错收敛于此）
     let (action, mcts_stats, nnue_stats) = match engine {
         EngineKind::Nnue => {
             let budget = app.build_search_budget(
@@ -60,66 +60,19 @@ pub async fn engine_move(
                 .acquire_nnue_model(model_file)
                 .await
                 .map_err(ApiError::ModelUnavailable)?;
-            let (action, stats) = crate::ai::choose_nnue_blocking(snap, evaluator, budget)
+            let (action, stats) = choose_nnue_blocking(snap, evaluator, budget)
                 .await
                 .map_err(ApiError::Internal)?;
             (action, None, Some(stats))
         }
-        EngineKind::MctsOnnx => {
-            #[cfg(feature = "onnx")]
-            {
-                let sims = req.mcts_sims.unwrap_or_else(|| app.default_sims()).max(1);
-                let model = app
-                    .acquire_model(model_file)
-                    .await
-                    .map_err(ApiError::ModelUnavailable)?;
-                // 锁外推理（无会话状态，无版本号校验需求；无上一棵树可复用）
-                let Some((action, tree)) =
-                    crate::ai::choose_blocking(snap, model, sims, None)
-                        .await
-                        .map_err(ApiError::Internal)?
-                else {
-                    return Err(ApiError::Internal("MCTS 未返回动作（无合法动作）".into()));
-                };
-                let mcts_stats = crate::dto::MctsStatsDto::from_session(Some(&tree))
-                    .ok_or_else(|| ApiError::Internal("搜索树缺少统计信息".into()))?;
-                (action, Some(mcts_stats), None)
-            }
-            #[cfg(not(feature = "onnx"))]
-            {
-                let _ = (&req.mcts_sims, &snap, &model_file);
-                return Err(ApiError::ModelUnavailable(
-                    "服务编译未启用 onnx 推理，MCTS+ONNX 路径不可用（请使用 .nnue / .pt 模型）".into(),
-                ));
-            }
-        }
-        EngineKind::MctsDL => {
-            #[cfg(feature = "torch")]
-            {
-                let sims = req.mcts_sims.unwrap_or_else(|| app.default_sims()).max(1);
-                let model = app
-                    .acquire_torch_model(model_file)
-                    .await
-                    .map_err(ApiError::ModelUnavailable)?;
-                // 锁外推理（无会话状态，无版本号校验需求；无上一棵树可复用）
-                let Some((action, tree)) =
-                    crate::ai::choose_torch_blocking(snap, model, sims, None)
-                        .await
-                        .map_err(ApiError::Internal)?
-                else {
-                    return Err(ApiError::Internal("MCTS 未返回动作（无合法动作）".into()));
-                };
-                let mcts_stats = crate::dto::MctsStatsDto::from_session(Some(&tree))
-                    .ok_or_else(|| ApiError::Internal("搜索树缺少统计信息".into()))?;
-                (action, Some(mcts_stats), None)
-            }
-            #[cfg(not(feature = "torch"))]
-            {
-                let _ = (&req.mcts_sims, &snap, &model_file);
-                return Err(ApiError::ModelUnavailable(
-                    "服务编译未启用 torch 推理，MCTS+DL 路径不可用（请使用 .onnx / .nnue 模型）".into(),
-                ));
-            }
+        EngineKind::MctsOnnx | EngineKind::MctsDL => {
+            let sims = req.mcts_sims.unwrap_or_else(|| app.default_sims()).max(1);
+            // 锁外推理（无会话状态，无版本号校验需求；无上一棵树可复用）
+            let (action, tree) =
+                choose_mcts_by_engine(&app, model_file, snap, sims, None).await?;
+            let mcts_stats = MctsStatsDto::from_session(Some(&tree))
+                .ok_or_else(|| ApiError::Internal("搜索树缺少统计信息".into()))?;
+            (action, Some(mcts_stats), None)
         }
     };
 
@@ -145,7 +98,3 @@ pub async fn engine_move(
         nnue_stats,
     }))
 }
-
-/// 保持 NnueStatsDto 导入被无 onnx 构建引用（抑制未使用告警的一致性占位）。
-#[allow(dead_code)]
-fn _touch(_: Option<NnueStatsDto>) {}

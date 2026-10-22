@@ -5,21 +5,16 @@
 
 use axum::extract::{Path, State};
 use axum::Json;
-use uuid::Uuid;
 
-use crate::app::sync::read_lock;
-use crate::app::sync::write_lock;
-use crate::state::EngineKind;
-
+use crate::app::sync::{read_lock, write_lock};
 use crate::error::ApiError;
 use crate::mcts::{MctsEdge, MctsNodeBoard, MctsNodeDetail, MctsRootInfo};
-use crate::state::SharedState;
+use crate::state::{get_mut_session, get_session, mcts_tree_of, parse_game_id, SharedState};
 
-fn parse_ids(id: String, node: String) -> Result<(Uuid, usize), ApiError> {
-    let game_id = Uuid::parse_str(&id).map_err(|_| ApiError::BadRequest(format!("非法对局 ID: {id}")))?;
-    let node_id: usize =
-        node.parse().map_err(|_| ApiError::BadRequest(format!("非法节点 ID: {node}")))?;
-    Ok((game_id, node_id))
+/// 解析路径中的节点 ID。
+fn parse_node_id(raw: &str) -> Result<usize, ApiError> {
+    raw.parse()
+        .map_err(|_| ApiError::BadRequest(format!("非法节点 ID: {raw}")))
 }
 
 /// GET /api/games/:id/mcts/root
@@ -27,12 +22,9 @@ pub async fn root(
     State(app): State<SharedState>,
     Path(id): Path<String>,
 ) -> Result<Json<MctsRootInfo>, ApiError> {
-    let game_id = Uuid::parse_str(&id).map_err(|_| ApiError::BadRequest(format!("非法对局 ID: {id}")))?;
+    let game_id = parse_game_id(&id)?;
     let games = read_lock(&app.games);
-    let s = games
-        .get(&game_id)
-        .ok_or_else(|| ApiError::GameNotFound(id.clone()))?;
-    let tree = s.mcts_tree.as_ref().ok_or(ApiError::MctsTreeMissing)?;
+    let tree = mcts_tree_of(get_session(&games, &id, game_id)?)?;
     Ok(Json(tree.root_info()))
 }
 
@@ -41,10 +33,10 @@ pub async fn children(
     State(app): State<SharedState>,
     Path((id, node)): Path<(String, String)>,
 ) -> Result<Json<Vec<MctsEdge>>, ApiError> {
-    let (game_id, node_id) = parse_ids(id, node)?;
+    let node_id = parse_node_id(&node)?;
+    let game_id = parse_game_id(&id)?;
     let games = read_lock(&app.games);
-    let s = games.get(&game_id).ok_or(ApiError::GameNotFound(game_id.to_string()))?;
-    let tree = s.mcts_tree.as_ref().ok_or(ApiError::MctsTreeMissing)?;
+    let tree = mcts_tree_of(get_session(&games, &id, game_id)?)?;
     Ok(Json(tree.children(node_id)))
 }
 
@@ -53,10 +45,10 @@ pub async fn detail(
     State(app): State<SharedState>,
     Path((id, node)): Path<(String, String)>,
 ) -> Result<Json<MctsNodeDetail>, ApiError> {
-    let (game_id, node_id) = parse_ids(id, node)?;
+    let node_id = parse_node_id(&node)?;
+    let game_id = parse_game_id(&id)?;
     let games = read_lock(&app.games);
-    let s = games.get(&game_id).ok_or(ApiError::GameNotFound(game_id.to_string()))?;
-    let tree = s.mcts_tree.as_ref().ok_or(ApiError::MctsTreeMissing)?;
+    let tree = mcts_tree_of(get_session(&games, &id, game_id)?)?;
     tree.detail(node_id)
         .map(Json)
         .ok_or_else(|| ApiError::BadRequest(format!("节点 {node_id} 不存在（超出树范围）")))
@@ -67,10 +59,10 @@ pub async fn board(
     State(app): State<SharedState>,
     Path((id, node)): Path<(String, String)>,
 ) -> Result<Json<MctsNodeBoard>, ApiError> {
-    let (game_id, node_id) = parse_ids(id, node)?;
+    let node_id = parse_node_id(&node)?;
+    let game_id = parse_game_id(&id)?;
     let games = read_lock(&app.games);
-    let s = games.get(&game_id).ok_or(ApiError::GameNotFound(game_id.to_string()))?;
-    let tree = s.mcts_tree.as_ref().ok_or(ApiError::MctsTreeMissing)?;
+    let tree = mcts_tree_of(get_session(&games, &id, game_id)?)?;
     tree.board(node_id)
         .map(Json)
         .ok_or_else(|| ApiError::BadRequest(format!("节点 {node_id} 不存在或未保存局面")))
@@ -79,21 +71,18 @@ pub async fn board(
 /// POST /api/games/:id/mcts/search
 ///
 /// 在当前局面上手动触发一次 MCTS 搜索（不走子），替换会话中的浏览树。
-/// 按对局绑定模型的扩展名分派推理后端（`.pt` → TorchScript 需 torch，
-/// 其余 → ONNX 需 onnx）；上一棵树沿「AI 上手 → 对手上手」尝试复用。
-#[allow(unreachable_code)] // 无 onnx/torch feature 时全部分支 return，尾部不可达
+/// 推理后端分派与 feature 门控在 `ai::choose_mcts_by_engine` 单点维护；
+/// 上一棵树沿「AI 上手 → 对手上手」尝试复用。
 pub async fn search(
     State(app): State<SharedState>,
     Path(id): Path<String>,
 ) -> Result<Json<MctsRootInfo>, ApiError> {
-    let game_id = Uuid::parse_str(&id).map_err(|_| ApiError::BadRequest(format!("非法对局 ID: {id}")))?;
+    let game_id = parse_game_id(&id)?;
 
     // 锁 1：读取搜索所需数据并取出上一棵树供复用（立即释放，不跨 await）
-    let (_variant, snap, sims, model_file, prev_tree) = {
+    let (snap, sims, model_file, prev_tree) = {
         let mut games = write_lock(&app.games);
-        let s = games
-            .get_mut(&game_id)
-            .ok_or_else(|| ApiError::GameNotFound(id.clone()))?;
+        let s = get_mut_session(&mut games, &id, game_id)?;
         let sims = s
             .opponent
             .as_ref()
@@ -106,62 +95,13 @@ pub async fn search(
             )
         })?;
         let prev_tree = s.take_reusable_mcts_tree();
-        (s.core.variant, s.core.current.clone(), sims, model_file, prev_tree)
+        (s.core.current.clone(), sims, model_file, prev_tree)
     };
 
     // 锁外取对局绑定的模型（随用随加载：缓存命中直接返回，首次使用时加载），
-    // 按扩展名分派推理后端
-    let engine = EngineKind::from_model_file(&model_file);
-    let (_action, tree): (usize, crate::mcts::MctsTreeBox) = match engine {
-        EngineKind::Nnue => {
-            return Err(ApiError::BadRequest(
-                "MCTS 手动搜索需要 .onnx / .pt 策略价值模型（.nnue 为 NNUE 叶评估后端，无搜索树）"
-                    .into(),
-            ));
-        }
-        EngineKind::MctsOnnx => {
-            #[cfg(feature = "onnx")]
-            {
-                let model = app
-                    .acquire_model(model_file)
-                    .await
-                    .map_err(ApiError::ModelUnavailable)?;
-                crate::ai::choose_blocking(snap, model, sims, prev_tree)
-                    .await
-                    .map_err(ApiError::Internal)?
-                    .ok_or_else(|| ApiError::Internal("MCTS 未返回动作".to_string()))?
-            }
-            #[cfg(not(feature = "onnx"))]
-            {
-                let _ = (_variant, snap, sims, prev_tree, &model_file);
-                return Err(ApiError::ModelUnavailable(
-                    "服务编译未启用 onnx 推理，MCTS+ONNX 手动搜索不可用（可绑定 .pt 模型走 torch 路径）"
-                        .into(),
-                ));
-            }
-        }
-        EngineKind::MctsDL => {
-            #[cfg(feature = "torch")]
-            {
-                let model = app
-                    .acquire_torch_model(model_file)
-                    .await
-                    .map_err(ApiError::ModelUnavailable)?;
-                crate::ai::choose_torch_blocking(snap, model, sims, prev_tree)
-                    .await
-                    .map_err(ApiError::Internal)?
-                    .ok_or_else(|| ApiError::Internal("MCTS 未返回动作".to_string()))?
-            }
-            #[cfg(not(feature = "torch"))]
-            {
-                let _ = (_variant, snap, sims, prev_tree, &model_file);
-                return Err(ApiError::ModelUnavailable(
-                    "服务编译未启用 torch 推理，MCTS+DL 手动搜索不可用（可绑定 .onnx 模型走 onnx 路径）"
-                        .into(),
-                ));
-            }
-        }
-    };
+    // 按扩展名分派推理后端（单一真源：choose_mcts_by_engine）
+    let (_action, tree) =
+        crate::ai::choose_mcts_by_engine(&app, model_file, snap, sims, prev_tree).await?;
     let info = tree.root_info();
 
     let mut games = write_lock(&app.games);
