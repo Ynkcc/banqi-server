@@ -33,9 +33,7 @@ macro_rules! with_env {
     };
 }
 
-// ============================================================================
 // 基础操作（泛型，仅依赖 trait）
-// ============================================================================
 
 /// 按变体创建初始局面的完整快照。
 pub fn initial_snapshot(variant: Variant) -> PositionSnapshot {
@@ -88,14 +86,10 @@ pub fn game_over<E: GameEnv>(env: &E) -> (bool, bool, Option<i32>) {
     env.check_game_over_conditions()
 }
 
-// ============================================================================
-// 动作坐标与特征维度（纯 config 推导，与具体环境类型无关）
-// ============================================================================
+// 动作坐标与特征维度（纯 config 推导）
 
-/// 动作对应的坐标 `[from, to]`（翻棋时 from == to）。
-///
-/// 经 `action_lookup_tables(&config)` 公开 API 查询（core 内按 config 缓存），
-/// 不依赖任何具体环境类型。
+/// 动作对应的坐标 `[from, to]`（翻棋时 from == to）；
+/// 经 `action_lookup_tables(&config)` 公开 API 查询，不依赖具体环境类型。
 pub fn coords_for_action(variant: Variant, action: usize) -> Option<Vec<usize>> {
     action_lookup_tables(&variant.config())
         .action_to_coords

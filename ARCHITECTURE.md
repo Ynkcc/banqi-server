@@ -18,16 +18,19 @@ src/
 │   │                  + GameStateView（前端 types.ts GameState 契约视图，状态与 MCTS 节点棋盘共用）
 │   ├── opponent.rs    OpponentKind（含 parse / needs_model）、choose_simple、EngineParams 钳制
 │   ├── search.rs      SearchBudget、run_gumbel（泛型核心）、tree_reuse_plan（泛型树复用）、
-│   │                  mcts_search_torch / mcts_search_onnx、nnue_search
+│   │                  mcts_search_torch / mcts_search_onnx、nnue_search、nnue_search_tree（树捕获）
 │   ├── models.rs      目录扫描（torch 时含 .pt）、EngineKind、ModelPool（随用随加载缓存）
 │   ├── mcts_view.rs   MCTS 树 DTO、只读查询、统计、MctsTreeBox 变体擦除（含 into_any 下沉）
+│   ├── expectimax_view.rs Expectimax 搜索轨迹树 DTO（ExEdge/ExNodeSummary/ExRootInfo/ExNodeBoard）、
+│   │                  只读查询（ex_root_info/ex_edge_list/ex_node_summary/ex_node_board）
 │   ├── common.rs      player 标签、棋谱条目映射
 │   └── sync.rs        锁中毒恢复辅助（lock / read_lock / write_lock）
 ├── api/               HTTP handlers
 │   ├── mod.rs         路由表 + health / variants / settings / capabilities / models
 │   ├── games.rs       对局 CRUD、走子、AI 回合、悔棋、模型绑定、opponent、move-action
 │   ├── engine.rs      POST /api/engine/move 无状态引擎查询（连线程序用）
-│   └── mcts.rs        MCTS 树查询 4 端点 + 手动搜索（按模型扩展名分派 torch / onnx）
+│   ├── mcts.rs        MCTS 树查询 4 端点 + 手动搜索（按模型扩展名分派 torch / onnx）
+│   └── nnue.rs        Expectimax 轨迹树查询 4 端点 + 手动搜索（.nnue 模型）
 ├── state.rs           AppState（games + params + ModelPool）、GameSession、模型加载包装
 ├── ai.rs              对手回合编排（锁 1 取数 → 锁外 spawn_blocking 搜索 → 锁 2 版本校验落子）
 ├── dto.rs             请求 / 响应类型（契约真源为 banqi-frontend/src/api/types.ts）
@@ -94,6 +97,11 @@ banqi-simd ← banqi-core ← banqi-engine（feat: torch(tch) / onnx(ort) / onnx
 | mcts_get_node_detail | GET /api/games/{id}/mcts/node/{n} |
 | mcts_get_node_board | GET /api/games/{id}/mcts/node/{n}/board |
 | mcts_search | POST /api/games/{id}/mcts/search |
+| —（Expectimax 轨迹树可视化，server 特有） | GET /api/games/{id}/nnue/root |
+| — | GET /api/games/{id}/nnue/node/{n} |
+| — | GET /api/games/{id}/nnue/node/{n}/children |
+| — | GET /api/games/{id}/nnue/node/{n}/board |
+| — | POST /api/games/{id}/nnue/search |
 | —（server 特有） | GET /api/health、GET /api/games、DELETE /api/games/{id}、POST /api/engine/move |
 
 ## DTO 契约（真源：banqi-frontend/src/api/types.ts）
@@ -127,6 +135,14 @@ cargo run --bin banqi-cli -- health         # CLI 冒烟测试
 
 ## 变更记录
 
+- 2026-10-22：Expectimax+NNUE 搜索轨迹树可视化：①`app/expectimax_view.rs`（`ExpectimaxTree` +
+  `ExEdge`/`ExNodeSummary`/`ExRootInfo`/`ExNodeBoard` DTO 与只读查询，树语义为 Alpha-Beta
+  搜索轨迹：flag 界类型 / TT 截断标注 / 机会 outcome 概率，见 banqi-core `expectimax::tree`）；
+  ②`app/search.rs` 新增 `nnue_search_tree`（threads=1 + 剔除 FEAT_ASP + `collect_tree`）；
+  ③`GameSession` 新增 `expectimax_tree`，`ai.rs::choose_nnue_blocking` 改返回树并在
+  `apply_opponent_action` 写入会话；④新增 `api/nnue.rs` 五端点（root/node/children/board +
+  POST search）与 `nnue.rs` 薄 re-export，`error.rs` 新增 `NnueTreeMissing`
+  （HTTP 404 / `NNUE_TREE_MISSING`）
 - 2026-10-22：归档 banqi-gui / banqi-app 至 `archive/`；banqi-app 8 模块并入 `src/app/`；
   补齐 MctsDL（torch）对手、`.pt` 模型加载绑定、跨回合树复用（泛型化 `tree_reuse_plan`）、
   capabilities / models / opponent / move-action 端点；DTO 契约统一为前端 types.ts

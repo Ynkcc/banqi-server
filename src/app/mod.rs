@@ -8,6 +8,7 @@
 //! - [`view`]：快照的中性结构化投影（棋盘格位/阵亡/隐藏/终局原因）；
 //! - [`opponent`]：对手抽象（规则对手 / 纯计算引擎的同步决策 + 引擎参数快照）；
 //! - [`mcts_view`]：MCTS 搜索树 DTO、只读查询、统计与变体擦除（`MctsTreeView`）；
+//! - [`expectimax_view`]：Expectimax 搜索轨迹树 DTO 与只读查询（可视化）；
 //! - [`search`]：Gumbel MCTS（含树复用）与 NNUE Expectimax 的同步搜索执行；
 //! - [`models`]：模型目录递归扫描、EngineKind 分派、随用随加载模型池、布局校验；
 //! - [`common`]：player 标签、棋谱条目映射等公共辅助；
@@ -19,6 +20,7 @@
 
 pub mod common;
 pub mod envops;
+pub mod expectimax_view;
 pub mod models;
 pub mod mcts_view;
 pub mod opponent;

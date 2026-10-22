@@ -16,9 +16,7 @@ use serde::Serialize;
 
 use crate::app::common::player_label;
 
-// ============================================================================
 // DTO（字段与两侧前端 types.ts 一一对应，snake_case）
-// ============================================================================
 
 /// 统一的"边"摘要：普通节点取 children，机会节点取 possible_states。
 #[derive(Debug, Clone, Serialize)]
@@ -101,9 +99,7 @@ pub struct MctsNodeBoard {
     pub move_coords: Vec<usize>,
 }
 
-// ============================================================================
 // 泛型树查询
-// ============================================================================
 
 /// 一次搜索保留的树（具体变体的环境类型实例化）。
 pub struct MctsTree<G: GameEnv> {
@@ -193,9 +189,7 @@ pub fn tree_stats<G: GameEnv>(arena: &MctsArena<G>, root_idx: usize) -> (usize, 
     (max_depth, nodes)
 }
 
-// ============================================================================
 // 变体擦除：trait object 挂到会话
-// ============================================================================
 
 pub type MctsTreeBox = Box<dyn MctsTreeView>;
 

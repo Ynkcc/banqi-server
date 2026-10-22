@@ -13,9 +13,7 @@ use banqi_core::core::env::{DarkChessEnv, PositionSnapshot};
 
 use crate::app::common::history_entries;
 
-// ============================================================================
 // 格位与棋盘投影
-// ============================================================================
 
 /// 格位状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,9 +100,7 @@ pub fn project(snap: &PositionSnapshot) -> BoardProjection {
     }
 }
 
-// ============================================================================
 // 终局原因
-// ============================================================================
 
 /// 终局原因。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,9 +123,7 @@ impl OverReason {
     }
 }
 
-/// 终局原因推导（胜负分出优先于截断，与 server `view()` 原口径一致）。
-///
-/// `over` = terminated || truncated；未结束时返回 `None`。
+/// 终局原因推导（胜负分出优先于截断）；未结束时返回 `None`。
 pub fn over_reason(over: bool, truncated: bool, winner: Option<i32>) -> Option<OverReason> {
     if !over {
         return None;
@@ -143,9 +137,7 @@ pub fn over_reason(over: bool, truncated: bool, winner: Option<i32>) -> Option<O
     }
 }
 
-// ============================================================================
 // 会话级中立视图（GameView）：gui / server DTO 的公共组装层
-// ============================================================================
 
 /// 带行列坐标的格位视图。
 #[derive(Debug, Clone, Copy)]
@@ -194,11 +186,8 @@ pub struct ScalarView {
 }
 
 /// 会话的完整中立视图：棋盘 / 阵亡 / 隐藏 / 合法动作 / 标量 / 棋谱 / 可悔棋。
-///
-/// gui（`GameState`）与 server（`GameStateResp`）的 DTO 均由此薄壳映射，
-/// 组装逻辑（行列换算、动作坐标、终局原因、棋谱 ply 编号等）在此单点维护；
-/// 字符串格式化差异（gui short_name / Debug 全名，server 小写英文）保留在
-/// 各侧 DTO 映射处。
+/// gui 与 server 的 DTO 均由此薄壳映射，组装逻辑在此单点维护；
+/// 字符串格式化差异保留在各侧 DTO 映射处。
 #[derive(Debug, Clone)]
 pub struct GameView {
     /// 全部格位（行优先，长度 = rows × cols）
@@ -275,16 +264,10 @@ pub fn game_view(core: &crate::app::session::SnapshotSession) -> GameView {
     }
 }
 
-// ============================================================================
-// 前端契约状态视图（GameStateView）：gui `GameState` / 前端 types.ts `GameState`
-// 的单一真源（snake_case 序列化，字段名与 types.ts 一一对应）
-// ============================================================================
+// 前端契约状态视图（GameStateView）：gui / 前端 types.ts `GameState` 的单一真源
 
-/// 完整对局状态视图（前端契约形状）。
-///
-/// 棋盘为短码字符串（`"Empty"` / `"Hidden"` / `"R_Sol"` / `"B_Gen"` …），
-/// 阵亡 / 隐藏列表为棋子类型全名（`"Soldier"` …），与前端 `VALID_TYPE_NAMES`
-/// 一致；位板 / 动作掩码 / 翻子概率由环境重建后直出。
+/// 完整对局状态视图（前端契约形状）：棋盘为短码字符串，
+/// 阵亡 / 隐藏列表为棋子类型全名；位板 / 动作掩码 / 翻子概率由环境重建后直出。
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct GameStateView {
     pub board: Vec<String>,
@@ -308,10 +291,8 @@ pub struct GameStateView {
     pub fen: String,
 }
 
-/// 由快照产出前端契约状态视图（状态 DTO 与 MCTS 节点棋盘共用）。
-///
-/// `DarkChessEnv::from_snapshot` 按快照自带变体配置重建环境（所有变体通用）；
-/// 快照由会话 / core 搜索生成，重建失败视为不可达（与 gui 同口径 panic）。
+/// 由快照产出前端契约状态视图（状态 DTO 与 MCTS 节点棋盘共用）；
+/// 快照由会话 / core 搜索生成，重建失败视为不可达。
 pub fn game_state_view(snap: &PositionSnapshot) -> GameStateView {
     use banqi_core::core::env::SnapshotEnv;
 

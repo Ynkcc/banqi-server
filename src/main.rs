@@ -15,6 +15,7 @@ mod config;
 mod dto;
 mod error;
 mod mcts;
+mod nnue;
 mod state;
 mod web;
 

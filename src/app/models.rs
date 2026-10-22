@@ -18,14 +18,10 @@ use banqi_engine::nnue::NnueEvaluator;
 
 use crate::app::sync::lock;
 
-// ============================================================================
 // 目录扫描
-// ============================================================================
 
 /// 递归收集目录下指定扩展名的模型文件（深度限制 `max_depth` 层，结果按路径排序）。
-///
-/// 扩展名精确匹配（大小写敏感），与收敛前两侧口径一致。
-/// 根目录不可读时记录 warn（子目录不可读静默跳过）。
+/// 扩展名精确匹配（大小写敏感）；根目录不可读时记录 warn。
 pub fn scan_model_files(dir: &Path, extensions: &[&str], max_depth: usize) -> Vec<PathBuf> {
     let mut out = Vec::new();
     collect_model_files(dir, 0, extensions, max_depth, &mut out);
@@ -67,9 +63,7 @@ fn collect_model_files(
     }
 }
 
-// ============================================================================
 // 推理后端分派
-// ============================================================================
 
 /// AI 推理后端类型（由对局绑定模型文件的扩展名决定）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -112,17 +106,11 @@ pub(crate) const SCAN_EXTENSIONS: &[&str] = &["pt", "onnx", "nnue"];
 #[cfg(not(feature = "torch"))]
 pub(crate) const SCAN_EXTENSIONS: &[&str] = &["onnx", "nnue"];
 
-// ============================================================================
-// 模型池：只提供「文件清单 + 按路径加载缓存」
-// ============================================================================
+// 模型池：文件清单 + 按路径加载缓存
 
-/// 同时支持两类模型文件，按扩展名分派推理后端：
-/// - `.onnx` → MCTS + ONNX（需 onnx feature）；
-/// - `.nnue` → Expectimax + NNUE（无外部依赖，始终可用）。
-///
-/// 不做任何变体关联：不要求文件命名、不预判模型所属变体、无默认兜底。
-/// 调用方在前端自行选择模型文件并与对局绑定；NNUE 布局校验经
-/// [`ModelPool::acquire_nnue_validated`] 显式进行，ONNX 由推理时 ort 报错。
+/// 模型池：按扩展名分派推理后端（`.onnx` → MCTS + ONNX，`.nnue` → Expectimax + NNUE）。
+/// 不做任何变体关联、无默认兜底：调用方自行选择模型文件并与对局绑定；
+/// NNUE 布局校验经 [`ModelPool::acquire_nnue_validated`] 显式进行。
 pub struct ModelPool {
     /// 扫描到的模型文件清单（`rescan` 刷新；含 .onnx / .nnue，torch 时含 .pt）
     files: Mutex<Vec<String>>,
@@ -303,15 +291,11 @@ impl ModelPool {
     }
 }
 
-// ============================================================================
 // ONNX 布局校验
-// ============================================================================
 
-/// 校验已加载 ONNX 模型与对局环境是否匹配：用当前变体的观测维度做一次探针推理
-/// （探针本体已下沉为 `OnnxModel::validate_layout`），形状不符时返回错误
-/// （否则搜索阶段会退化成均匀策略）。
-///
-/// 模型加载与对局绑定共用：加载时校验、变体切换后重校验并解绑失配模型。
+/// 校验已加载 ONNX 模型与对局环境是否匹配（探针本体已下沉为
+/// `OnnxModel::validate_layout`），形状不符时返回错误。
+/// 模型加载与对局绑定共用。
 #[cfg(feature = "onnx")]
 pub fn check_onnx_model_matches<G: banqi_core::core::env::GameEnv>(
     m: &banqi_engine::inference::onnx::OnnxModel,

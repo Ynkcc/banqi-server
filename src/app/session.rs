@@ -117,9 +117,7 @@ impl SnapshotSession {
     }
 
     /// 应用动作（校验终局与合法性；维护快照栈、决策历史与版本号）。
-    ///
-    /// 合法性预检后 step 仍失败只可能是内部不变量问题：回滚压栈并报错，
-    /// 恢复 `stack.len() == records.len()`。
+    /// 预检后 step 仍失败只可能是内部不变量问题：回滚压栈并报错。
     pub fn apply_action(&mut self, action: usize) -> Result<StepOutcome, SessionError> {
         if self.is_over() {
             return Err(SessionError::GameOver);
@@ -169,10 +167,8 @@ impl SnapshotSession {
         Ok(())
     }
 
-    /// 悔棋到当前行棋方上次行动前：回退快照直至回到「当前行棋方即将行动」的局面。
-    ///
-    /// AI 对局中（AI 走完后轮到人类）会一并回退 AI 与人类各一步；
-    /// PvP 中即回退最近一步。当前玩家尚未行动过时返回错误。
+    /// 悔棋到当前行棋方上次行动前（AI 对局中会一并回退 AI 与人类各一步）；
+    /// 当前玩家尚未行动过时返回错误。
     pub fn undo_to_current_player(&mut self) -> Result<(), SessionError> {
         if self.is_over() {
             return Err(SessionError::GameOver);

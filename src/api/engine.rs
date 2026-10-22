@@ -60,7 +60,7 @@ pub async fn engine_move(
                 .acquire_nnue_model(model_file)
                 .await
                 .map_err(ApiError::ModelUnavailable)?;
-            let (action, stats) = choose_nnue_blocking(snap, evaluator, budget)
+            let (action, stats, _tree) = choose_nnue_blocking(snap, evaluator, budget)
                 .await
                 .map_err(ApiError::Internal)?;
             (action, None, Some(stats))

@@ -132,26 +132,28 @@ pub(crate) async fn choose_mcts_by_engine(
     }
 }
 
-/// 在 blocking 线程池内执行一次 Expectimax+NNUE 决策。
+/// 在 blocking 线程池内执行一次 Expectimax+NNUE 决策，并保留搜索轨迹树。
 ///
 /// `DarkChessEnv::from_snapshot` 按快照自带变体配置重建环境（所有变体通用），
-/// 搜索核心在 `crate::app::search::nnue_search`（含 `.nnue` 头部布局校验，
-/// 跨变体权重硬失败）。返回 `(选择的动作, 搜索统计)`。
+/// 搜索核心在 `crate::app::search::nnue_search_tree`（含 `.nnue` 头部布局校验，
+/// 跨变体权重硬失败；可视化约束 threads=1 + 关闭 ASP + 树捕获）。
+/// 返回 `(选择的动作, 搜索统计, 搜索轨迹树)`。
 pub(crate) async fn choose_nnue_blocking(
     snap: PositionSnapshot,
     evaluator: Arc<NnueEvaluator>,
     budget: SearchBudget,
-) -> Result<(usize, NnueStatsDto), String> {
+) -> Result<(usize, NnueStatsDto, Option<crate::app::expectimax_view::ExpectimaxTree>), String> {
     let joined = tokio::task::spawn_blocking(move || {
         use banqi_core::core::env::SnapshotEnv;
 
         let env = DarkChessEnv::from_snapshot(&snap)
             .map_err(|e| format!("重建环境失败: {e}"))?;
-        crate::app::search::nnue_search(&env, evaluator, budget)
+        crate::app::search::nnue_search_tree(&env, evaluator, budget)
     })
     .await
     .map_err(|e| format!("blocking 任务 join 失败: {e}"))?;
-    let (action, stats) = joined?;
+    let (action, kept) = joined?;
+    let stats = &kept.stats;
     Ok((
         action,
         NnueStatsDto {
@@ -164,6 +166,7 @@ pub(crate) async fn choose_nnue_blocking(
             reached_depth: stats.reached_depth,
             elapsed_ms: stats.elapsed_ms,
         },
+        Some(kept),
     ))
 }
 
@@ -249,6 +252,7 @@ fn apply_opponent_action(
     expect_version: u64,
     action: usize,
     mcts_tree: Option<crate::mcts::MctsTreeBox>,
+    ex_tree: Option<crate::app::expectimax_view::ExpectimaxTree>,
     nnue_stats: Option<NnueStatsDto>,
 ) -> Result<Option<(GameStateResp, AppliedAction, Option<MctsStatsDto>, Option<NnueStatsDto>)>, ApiError> {
     let mut games = write_lock(&app.games);
@@ -271,6 +275,7 @@ fn apply_opponent_action(
     // 保留本次搜索树供前端查询（下一步对局状态变更后仍可浏览，直到下次搜索替换；
     // 非搜索类对手落子后清空旧树避免展示过期决策）
     s.mcts_tree = mcts_tree;
+    s.expectimax_tree = ex_tree;
     let mcts_stats = MctsStatsDto::from_session(s.mcts_tree.as_ref());
     tracing::debug!(game = %game_id, "对手落子: action={action}，终局={}", outcome.is_over());
     Ok(Some((
@@ -299,11 +304,11 @@ pub async fn run_opponent_turn(
 
     // 规则对手：锁内已完成决策，直接落子
     if let Some(action) = plan.ready_action {
-        return apply_opponent_action(app, game_id, expect_version, action, None, None);
+        return apply_opponent_action(app, game_id, expect_version, action, None, None, None);
     }
 
     // 锁外搜索（blocking 线程池，按对手种类分派）
-    let (action, mcts_tree, nnue_stats) = match plan.kind {
+    let (action, mcts_tree, ex_tree, nnue_stats) = match plan.kind {
         // 已在锁 1 处理，防御性兜底
         OpponentKind::Rule(_) => return Ok(None),
         OpponentKind::Engine => {
@@ -321,7 +326,7 @@ pub async fn run_opponent_turn(
             .await
             .map_err(|e| ApiError::Internal(format!("blocking 任务 join 失败: {e}")))?
             .map_err(ApiError::Internal)?;
-            (action, None, None)
+            (action, None, None, None)
         }
         OpponentKind::Nnue => {
             let model_file = plan
@@ -332,11 +337,11 @@ pub async fn run_opponent_turn(
                 .acquire_nnue_model(model_file)
                 .await
                 .map_err(ApiError::ModelUnavailable)?;
-            let (action, stats) =
+            let (action, stats, ex_tree) =
                 choose_nnue_blocking(plan.snap, evaluator, plan.search_budget)
                     .await
                     .map_err(ApiError::Internal)?;
-            (action, None, Some(stats))
+            (action, None, ex_tree, Some(stats))
         }
         // MCTS 类对手：推理后端按模型文件扩展名分派（choose_mcts_by_engine 单一真源）
         OpponentKind::MctsOnnx | OpponentKind::MctsDL => {
@@ -352,9 +357,9 @@ pub async fn run_opponent_turn(
                 plan.prev_tree,
             )
             .await?;
-            (action, Some(tree), None)
+            (action, Some(tree), None, None)
         }
     };
 
-    apply_opponent_action(app, game_id, expect_version, action, mcts_tree, nnue_stats)
+    apply_opponent_action(app, game_id, expect_version, action, mcts_tree, ex_tree, nnue_stats)
 }

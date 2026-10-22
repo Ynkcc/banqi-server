@@ -19,9 +19,7 @@ use banqi_engine::nnue::NnueEvaluator;
 
 use crate::app::mcts_view::{MctsSearchStats, MctsTree};
 
-// ============================================================================
 // Expectimax 搜索预算（NNUE 对手 / 纯计算引擎共用）
-// ============================================================================
 
 /// 预算模式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,14 +54,8 @@ impl BudgetMode {
 }
 
 /// Expectimax 搜索预算：三种模式 + 硬超时。
-///
-/// - [`BudgetMode::Nodes`]：仅 `nodes` 生效（深度不限）；
-/// - [`BudgetMode::DepthNodes`]：`depth` 与 `nodes` 双重约束（先到为准）；
-/// - [`BudgetMode::Time`]：仅 `time_ms` 生效（节点与深度不限）。
-///
-/// `timeout_ms` 为硬超时（必选，默认 60s），对全部模式生效：超时放弃后续
-/// 搜索（含进行中的迭代层），返回最近完成迭代层的实际结果（core 语义：
-/// 预算/时间耗尽 → 迭代加深保留已完成层）。
+/// `timeout_ms` 为硬超时（必选，默认 60s），对全部模式生效：超时放弃后续搜索，
+/// 返回最近完成迭代层的实际结果。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SearchBudget {
     pub mode: BudgetMode,
@@ -190,12 +182,8 @@ fn env_state_eq<G: GameEnv>(a: &G, b: &G) -> bool {
 }
 
 /// 计算搜索树复用计划：把上一棵树的根沿「AI 上手 → 对手上手」推进两步。
-///
-/// 泛型实现：所有变体环境（`GameEnv` 包装）均可复用。翻棋 / 吃暗子等
-/// 机会动作用 `chance_outcomes` 枚举全部候选结果 + 当前局面特征校验
-/// （确定性重放，不依赖随机步进），确保推进路径与实际对局完全一致；
-/// 任一环节对不上（树过期、变体切换、跳过回合等）返回 None，
-/// 调用方回退到全新建树。
+/// 机会动作用 `chance_outcomes` 枚举全部候选结果 + 特征校验（确定性重放）；
+/// 任一环节对不上（树过期、变体切换等）返回 None，调用方回退全新建树。
 pub fn tree_reuse_plan<G>(prev: MctsTree<G>, cur: &G) -> Option<ReusePlan<G>>
 where
     G: GameEnv + Copy + SnapshotEnv,
@@ -297,10 +285,8 @@ pub struct NnueSearchStats {
 }
 
 /// Expectimax 搜索一次（NNUE 叶评估；同步；调用方自行 spawn_blocking）。
-///
-/// 搜索入口以实际 config 校验 `.nnue` 头部布局（跨变体权重硬失败）。
-/// 预算/深度/时间约束与硬超时由 [`SearchBudget`] 单点换算；超时放弃后续
-/// 搜索，返回最近完成迭代层的实际结果。返回 `(选择的动作, 搜索统计)`。
+/// 搜索入口校验 `.nnue` 头部布局（跨变体权重硬失败）；
+/// 预算约束由 [`SearchBudget`] 单点换算。返回 `(选择的动作, 搜索统计)`。
 pub fn nnue_search(
     env: &DarkChessEnv,
     evaluator: Arc<NnueEvaluator>,
@@ -311,7 +297,6 @@ pub fn nnue_search(
         .validate_layout(&env.config)
         .map_err(|e| format!(".nnue 权重与当前变体布局不匹配: {e}"))?;
     let mut cfg = budget.to_search_config();
-    // 注入 NNUE 叶评估器（to_search_config 只换算预算/时间/深度约束）
     cfg.nnue_evaluator = Some(evaluator);
     let started = Instant::now();
     let SearchResult { action, depth: reached_depth, nodes, .. } = banqi_core::core::expectimax::search(env, &cfg)
@@ -327,6 +312,50 @@ pub fn nnue_search(
             nodes,
             reached_depth,
             elapsed_ms,
+        },
+    ))
+}
+
+/// Expectimax + NNUE 搜索一次并捕获搜索轨迹树（可视化；同步）。
+/// 在 [`nnue_search`] 基础上追加可视化约束：`threads = 1`（多线程搜索碎片
+/// 无法连贯成树）、剔除 `FEAT_ASP`（fail 重搜污染同层树）、`collect_tree = true`。
+/// 返回 `(选择的动作, ExpectimaxTree)`；预算耗尽时树为最近完成层。
+pub fn nnue_search_tree(
+    env: &DarkChessEnv,
+    evaluator: Arc<NnueEvaluator>,
+    budget: SearchBudget,
+) -> Result<(usize, crate::app::expectimax_view::ExpectimaxTree), String> {
+    use banqi_core::core::expectimax::FEAT_ASP;
+
+    let budget = budget.clamped();
+    evaluator
+        .validate_layout(&env.config)
+        .map_err(|e| format!(".nnue 权重与当前变体布局不匹配: {e}"))?;
+    let mut cfg = budget.to_search_config();
+    cfg.nnue_evaluator = Some(evaluator);
+    // 可视化约束：单线程 + 关闭 aspiration + 开启树捕获
+    cfg.threads = 1;
+    cfg.features &= !FEAT_ASP;
+    cfg.collect_tree = true;
+    let started = Instant::now();
+    let SearchResult { action, depth: reached_depth, nodes, tree, .. } =
+        banqi_core::core::expectimax::search(env, &cfg)
+            .ok_or_else(|| "Expectimax 未返回动作（无合法动作）".to_string())?;
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    Ok((
+        action,
+        crate::app::expectimax_view::ExpectimaxTree {
+            tree: tree.unwrap_or_default(),
+            chosen_action: action,
+            stats: NnueSearchStats {
+                mode: budget.mode.as_str(),
+                depth: (budget.mode == BudgetMode::DepthNodes).then_some(cfg.max_depth).unwrap_or(0),
+                budget: (budget.mode != BudgetMode::Time).then_some(cfg.node_budget).unwrap_or(0),
+                time_limit_ms: cfg.time_limit_ms,
+                nodes,
+                reached_depth,
+                elapsed_ms,
+            },
         },
     ))
 }
