@@ -10,7 +10,8 @@
 //!   + 引擎参数快照；对局与玩家/策略解耦的单一真源）；
 //! - [`mcts_view`]：MCTS 搜索树 DTO、只读查询、统计与变体擦除（`MctsTreeView`）；
 //! - [`expectimax_view`]：Expectimax 搜索轨迹树 DTO 与只读查询（可视化）；
-//! - [`search`]：Gumbel MCTS（含树复用）与 NNUE Expectimax 的同步搜索执行；
+//! - [`search`]：Expectimax 搜索预算与 NNUE 轨迹树搜索（Gumbel MCTS 编排
+//!   已下沉 `banqi-engine::engine::gumbel`）；
 //! - [`models`]：模型目录递归扫描、EngineKind 分派、随用随加载模型池、布局校验；
 //! - [`common`]：player 标签、棋谱条目映射等公共辅助；
 //! - [`sync`]：锁中毒恢复辅助。

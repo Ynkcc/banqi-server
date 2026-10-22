@@ -18,8 +18,8 @@ src/
 │   │                  + GameStateView（前端 types.ts GameState 契约视图，状态与 MCTS 节点棋盘共用）
 │   ├── player.rs      ★ 统一选手层：PlayerSlot/Slots 红黑槽位 + StrategyKind 契约 +
 │   │                  decide/dry_run 单一决策入口（含 MCTS 树复用三档分派）+ EngineParams
-│   ├── search.rs      SearchBudget、run_gumbel（泛型核心）、tree_reuse_plan（泛型树复用）、
-│   │                  mcts_search_torch / mcts_search_onnx、nnue_search、nnue_search_tree（树捕获）
+│   ├── search.rs      SearchBudget（三模式预算）、nnue_search_tree（NNUE 轨迹树搜索）；
+│   │                  Gumbel MCTS 编排已下沉 banqi-engine::engine::gumbel
 │   ├── models.rs      目录扫描（torch 时含 .pt）、EngineKind、ModelPool（随用随加载缓存）
 │   ├── mcts_view.rs   MCTS 树 DTO、只读查询、统计、MctsTreeBox 变体擦除（含 into_any 下沉）
 │   ├── expectimax_view.rs Expectimax 搜索轨迹树 DTO（ExEdge/ExNodeSummary/ExRootInfo/ExNodeBoard）、
@@ -39,7 +39,7 @@ src/
 ├── error.rs           ApiError + HTTP 状态码 / 机器可读错误码
 ├── config.rs          ServerConfig（CLI 参数解析）
 ├── web.rs             rust-embed 内嵌前端 + SPA fallback
-├── mcts.rs / variant.rs  薄 re-export（指向 crate::app::*，保持引用路径稳定）
+├── mcts.rs            薄 re-export（指向 crate::app::mcts_view，保持引用路径稳定）
 └── bin/cli.rs         banqi-cli：REST API 薄封装客户端（LLM / 脚本测试用）
 ```
 
@@ -155,6 +155,15 @@ cargo run --bin banqi-cli -- health         # CLI 冒烟测试
 ```
 
 ## 变更记录
+
+- 2026-10-23：Gumbel MCTS 搜索编排下沉 banqi-engine：`app/search.rs` 的
+  `run_gumbel` / `run_gumbel_reuse_root` / `tree_reuse_plan` / `mcts_search_impl` /
+  `mcts_search_torch` / `mcts_search_onnx`（变体无关泛型编排 + 树复用计划校验）迁入
+  `banqi-engine::engine::gumbel`（单一真源）；`MctsTree` / `MctsSearchStats` / `tree_stats`
+  随迁并经 `app/mcts_view.rs` re-export 保持路径稳定；新增 `GumbelSearchParams`
+  （sims / c_scale / 候选上限 / 噪声尺度 → `GumbelConfig` 单点换算，`for_play` 同源语义）；
+  `app/player.rs` 的 MCTS 搜索分派改指 engine 路径；本 crate `search.rs` 仅保留
+  `SearchBudget` 预算定义与 `nnue_search_tree` NNUE 轨迹树搜索。
 
 - 2026-10-23：去重与正确性收敛：①手动搜索锁 2 版本校验收口——`state.rs` 新增
   `store_manual_search_trees`（版本号变化时丢弃结果），`api/mcts.rs` / `api/nnue.rs`

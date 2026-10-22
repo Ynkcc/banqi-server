@@ -16,6 +16,9 @@ use serde::Serialize;
 
 use crate::app::common::player_label;
 
+// 搜索结果树（真源在 banqi-engine::engine::gumbel，server 仅 re-export 保持路径稳定）
+pub use banqi_engine::engine::gumbel::{MctsSearchStats, MctsTree, tree_stats};
+
 // DTO（字段与两侧前端 types.ts 一一对应，snake_case）
 
 /// 统一的"边"摘要：普通节点取 children，机会节点取 possible_states。
@@ -31,23 +34,6 @@ pub struct MctsEdge {
     pub health_q: f32,
     pub is_chance: bool,
     pub chance_prob: f32,
-}
-
-/// 一次 Gumbel MCTS 搜索的统计摘要（供前端日志栏展示）。
-#[derive(Debug, Clone, Serialize)]
-pub struct MctsSearchStats {
-    /// 本次搜索是否复用了上一回合的搜索树（root 下移）
-    pub reused: bool,
-    /// 模拟次数预算（前端设置的 sims）
-    pub budget: usize,
-    /// 本次实际执行的模拟次数（根节点访问增量）
-    pub actual_sims: u32,
-    /// 搜索树最大深度（从当前根算起）
-    pub max_depth: usize,
-    /// 搜索树节点总数
-    pub nodes: usize,
-    /// 搜索本体（`mcts.run()`）耗时（毫秒）
-    pub elapsed_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -100,14 +86,6 @@ pub struct MctsNodeBoard {
 }
 
 // 泛型树查询
-
-/// 一次搜索保留的树（具体变体的环境类型实例化）。
-pub struct MctsTree<G: GameEnv> {
-    pub arena: MctsArena<G>,
-    pub root_idx: usize,
-    pub chosen_action: usize,
-    pub stats: MctsSearchStats,
-}
 
 /// 收集某节点的全部子边（普通 + 机会），按 N 降序、再按先验降序。
 pub fn mcts_edge_list<G: GameEnv>(arena: &MctsArena<G>, node_id: usize) -> Vec<MctsEdge> {
@@ -164,29 +142,6 @@ pub fn mcts_node_summary<G: GameEnv>(arena: &MctsArena<G>, node_id: usize) -> Mc
         is_expanded: node.is_expanded,
         edge_count: node.children.len() + node.possible_states.len(),
     }
-}
-
-/// 统计搜索树的最大深度与节点总数（BFS，防环）。
-pub fn tree_stats<G: GameEnv>(arena: &MctsArena<G>, root_idx: usize) -> (usize, usize) {
-    let mut max_depth = 0usize;
-    let mut nodes = 0usize;
-    let mut visited = std::collections::HashSet::new();
-    let mut stack = vec![(root_idx, 0usize)];
-    while let Some((idx, depth)) = stack.pop() {
-        if !visited.insert(idx) {
-            continue;
-        }
-        nodes += 1;
-        max_depth = max_depth.max(depth);
-        let node = arena.get(idx);
-        for (_, child) in &node.children {
-            stack.push((*child, depth + 1));
-        }
-        for (_, _, child) in &node.possible_states {
-            stack.push((*child, depth + 1));
-        }
-    }
-    (max_depth, nodes)
 }
 
 // 变体擦除：trait object 挂到会话

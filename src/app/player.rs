@@ -415,7 +415,7 @@ pub fn decide(
                     params.mcts_sims,
                     prev_tree,
                     |f| pool.acquire_onnx(f),
-                    crate::app::search::mcts_search_onnx::<DarkChessEnv>,
+                    banqi_engine::engine::gumbel::mcts_search_onnx::<DarkChessEnv>,
                 )
             }
             #[cfg(not(feature = "onnx"))]
@@ -434,7 +434,7 @@ pub fn decide(
                     params.mcts_sims,
                     prev_tree,
                     |f| pool.acquire_torch(f),
-                    crate::app::search::mcts_search_torch::<DarkChessEnv>,
+                    banqi_engine::engine::gumbel::mcts_search_torch::<DarkChessEnv>,
                 )
             }
             #[cfg(not(feature = "torch"))]
