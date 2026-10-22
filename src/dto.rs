@@ -148,33 +148,6 @@ pub struct EngineMoveReq {
 // ============================================================================
 
 #[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PieceView {
-    /// 棋子类型（小写英文："soldier" / "cannon" / ...）
-    #[serde(rename = "type")]
-    pub piece_type: String,
-    /// 归属方："red" / "black"
-    pub side: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CellView {
-    /// 格位索引（0..rows*cols，行优先）
-    pub index: usize,
-    /// 行号
-    pub row: usize,
-    /// 列号
-    pub col: usize,
-    /// "empty" / "hidden" / "revealed"
-    pub state: String,
-    /// 仅 revealed 时给出（暗子的真实身份不泄露）
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub piece: Option<PieceView>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct ActionView {
     /// 动作空间索引（走子请求使用）
     pub action: usize,
@@ -187,7 +160,6 @@ pub struct ActionView {
 }
 
 #[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct AiInfoView {
     pub enabled: bool,
     /// 对手种类："PvP" / "Random" / "RevealFirst" / "CaptureFirst" / "Engine" /
@@ -221,26 +193,21 @@ pub struct AiInfoView {
     pub search_timeout_ms: Option<u64>,
 }
 
+/// GET /api/games/:id 响应：前端 `GameState`（types.ts，snake_case）为基座
+/// 的完整状态 + server 专属扩展字段。
+///
+/// `game`（flatten 展开）= [`crate::app::view::GameStateView`]：棋盘短码、
+/// 阵亡/隐藏全名、动作掩码、位板、BFEN 等，前端零适配直传；扩展字段为
+/// server 资源模型专属（对局 ID / 版本号 / 合法动作 / 对手信息等）。
 #[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct GameStateResp {
+    /// 前端 GameState 全量字段（flatten 展开为顶层）
+    #[serde(flatten)]
+    pub game: crate::app::view::GameStateView,
     pub game_id: String,
-    pub variant: String,
-    /// 当前局面 BFEN 文本（复制 / 粘贴重建 / issue 复现用；
-    /// 不编码 last_action 与 true_board，见 banqi-core fen.rs）
-    pub fen: String,
     /// 单调递增版本号（并发/竞态防护：AI 结果与客户端操作基于版本对齐）
     pub version: u64,
-    pub current_player: String,
-    /// 连续无吃子步数
-    pub move_count: usize,
-    /// 总步数
-    pub total_steps: usize,
     pub max_steps: usize,
-    pub red_score: i32,
-    pub black_score: i32,
-    pub red_hp: i32,
-    pub black_hp: i32,
     /// 对局是否结束
     pub over: bool,
     /// 胜负分出而结束（对齐前端 StepResult.terminated）
@@ -255,16 +222,6 @@ pub struct GameStateResp {
     pub winner: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_action: Option<usize>,
-    pub board: Vec<CellView>,
-    /// 红方阵亡棋子类型列表（小写英文，含重复项；Tauri 后端为 Debug 全名）
-    pub dead_red: Vec<String>,
-    /// 黑方阵亡棋子类型列表
-    pub dead_black: Vec<String>,
-    /// 红方未翻开（隐藏）棋子类型列表（小写英文）。
-    /// 按型计数可由公开信息推导（初始构成 − 已翻开 − 已阵亡），不泄露暗子身份。
-    pub hidden_red: Vec<String>,
-    /// 黑方未翻开（隐藏）棋子类型列表
-    pub hidden_black: Vec<String>,
     pub legal_actions: Vec<ActionView>,
     /// 决策历史（棋谱）：每手棋的实际执行结果，含翻棋/吃暗子翻出的真实棋子。
     /// 悔棋后同步截断；重开对局清空。
@@ -273,16 +230,15 @@ pub struct GameStateResp {
     /// 当前是否轮到 AI 行棋
     pub ai_to_move: bool,
     /// 当前是否可悔棋（当前行棋方存在更早的行动快照且对局未结束）
-    pub undoable: bool,
+    pub can_undo: bool,
 }
 
-/// 一手棋的决策记录视图（对局历史查询 / 棋谱展示）。
+/// 一手棋的决策记录视图（对齐前端 types.ts `HistoryMove`）。
 #[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct HistoryMoveView {
     /// 手数（1 起，对局内单调递增）
     pub ply: usize,
-    /// 行棋方："red" / "black"
+    /// 行棋方："Red" / "Black"
     pub player: String,
     /// 动作空间索引
     pub action: usize,
@@ -296,25 +252,23 @@ pub struct HistoryMoveView {
     pub is_chance: bool,
     /// 吃明子（目标是对方已翻开的明子）
     pub is_capture: bool,
-    /// 机会动作实际翻出的棋子（翻棋 = 翻出的子；吃暗子含炮打暗子 = 打出的子）
+    /// 机会动作实际翻出的棋子短码（"R_Sol" 等；翻棋 = 翻出的子；吃暗子含炮打暗子 = 打出的子）
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub revealed: Option<PieceView>,
-    /// 被消灭的棋子（吃明子的被吃子；吃暗子时 == revealed）
+    pub revealed: Option<String>,
+    /// 被消灭的棋子短码（吃明子的被吃子；吃暗子时 == revealed）
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub captured: Option<PieceView>,
+    pub captured: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct AppliedAction {
     /// 行棋方："red" / "black"
     pub player: String,
     pub action: ActionView,
 }
 
-/// 一次 Gumbel MCTS 搜索统计（对齐前端 types.ts `MctsSearchStats`）。
+/// 一次 Gumbel MCTS 搜索统计（对齐前端 types.ts `MctsSearchStats`，snake_case）。
 #[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct MctsStatsDto {
     pub reused: bool,
     pub budget: usize,
@@ -340,9 +294,8 @@ impl MctsStatsDto {
     }
 }
 
-/// 一次 Expectimax 搜索统计（对齐 banqi-app `NnueSearchStats`）。
+/// 一次 Expectimax 搜索统计（对齐前端 types.ts `NnueSearchStats`，snake_case）。
 #[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct NnueStatsDto {
     /// 推理后端标识（恒为 "nnue"）
     pub engine: String,
@@ -362,13 +315,20 @@ pub struct NnueStatsDto {
     pub elapsed_ms: u64,
 }
 
+/// 走子 / AI 回合 / 悔棋响应：对齐前端 types.ts `StepResult`
+/// （state + terminated/truncated/winner + 搜索统计），附 server 专属 actions。
 #[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct MoveResp {
     pub state: GameStateResp,
-    /// 本次请求实际执行的动作序列（人类 1 步 + 可能的 AI 回应 1 步）
+    /// 胜负分出而结束（对齐前端 StepResult.terminated）
+    pub terminated: bool,
+    /// 步数/规则截断而结束（对齐前端 StepResult.truncated）
+    pub truncated: bool,
+    /// 全局视角胜者：1=红 / -1=黑 / 0=平局 / null=未结束（对齐前端 StepResult.winner）
+    pub winner: Option<i32>,
+    /// 本次请求实际执行的动作序列（人类 1 步 + 可能的 AI 回应 1 步；server 扩展字段）
     pub actions: Vec<AppliedAction>,
-    /// AI 回合的 MCTS 搜索统计（本请求含 MctsOnnx AI 落子时才有）
+    /// AI 回合的 MCTS 搜索统计（本请求含 MCTS 类 AI 落子时才有）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mcts_stats: Option<MctsStatsDto>,
     /// AI 回合的 NNUE 搜索统计（本请求含 Nnue AI 落子时才有）
@@ -377,7 +337,6 @@ pub struct MoveResp {
 }
 
 #[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct GameSummary {
     pub game_id: String,
     pub variant: String,
@@ -391,21 +350,18 @@ pub struct GameSummary {
 }
 
 #[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct GameListResp {
     pub games: Vec<GameSummary>,
 }
 
 #[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct GameCreatedResp {
     pub game_id: String,
     pub state: GameStateResp,
 }
 
-/// 变体元信息：与前端 `VariantInfo`（types.ts）字段一一对应。
+/// 变体元信息：与前端 `VariantInfo`（types.ts）字段一一对应（snake_case）。
 #[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct VariantInfo {
     /// 变体 ID（`Variant::as_str()`）
     pub id: String,
@@ -418,7 +374,6 @@ pub struct VariantInfo {
 }
 
 #[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct VariantsResp {
     pub variants: Vec<VariantInfo>,
 }
@@ -464,7 +419,6 @@ pub struct HealthResp {
 
 /// POST /api/engine/move 响应：给定局面的引擎决策（不落子、无会话状态）。
 #[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct EngineMoveResp {
     /// 变体 ID（由 BFEN 解出）
     pub variant: String,
@@ -488,6 +442,49 @@ pub struct EngineMoveResp {
     pub nnue_stats: Option<NnueStatsDto>,
 }
 
+/// GET /api/capabilities 响应：编译期启用的推理后端
+/// （前端据此隐藏不可用的对手与模型类型；对齐前端 types.ts `Capabilities`）。
+#[derive(Debug, Serialize)]
+pub struct CapabilitiesResp {
+    /// TorchScript 推理（MctsDL / .pt 模型）
+    pub torch: bool,
+    /// ONNX Runtime 推理（MctsOnnx / .onnx 模型）
+    pub onnx: bool,
+    /// NNUE 推理（无外部依赖，恒可用）
+    pub nnue: bool,
+}
+
+/// GET /api/models 响应：模型目录与其中的模型文件（对齐前端 types.ts `ModelList`）。
+#[derive(Debug, Serialize)]
+pub struct ModelListResp {
+    /// 模型目录路径（服务端 --models 参数）
+    pub dir: String,
+    pub models: Vec<ModelEntryDto>,
+}
+
+/// 单个模型文件条目（对齐前端 types.ts `ModelEntry`）。
+#[derive(Debug, Serialize)]
+pub struct ModelEntryDto {
+    /// 文件名（展示用）
+    pub name: String,
+    /// 完整路径（创建对局 / 绑定模型时作为 modelFile 使用）
+    pub path: String,
+}
+
+/// GET /api/games/:id/opponent 响应：当前对局的对手种类
+/// （"PvP" = 本地双人；其余取值见 `OpponentKind::as_str`）。
+#[derive(Debug, Serialize)]
+pub struct OpponentResp {
+    pub opponent: String,
+}
+
+/// GET /api/games/:id/move-action 响应：坐标对 → 动作空间索引
+/// （几何映射，只取决于变体；`null` = 坐标不构成任何动作）。
+#[derive(Debug, Serialize)]
+pub struct MoveActionResp {
+    pub action: Option<usize>,
+}
+
 // ============================================================================
 // 序列化辅助
 // ============================================================================
@@ -509,16 +506,12 @@ pub fn winner_str(w: Option<i32>) -> Option<String> {
     }
 }
 
-pub fn piece_type_str(t: banqi_core::core::env::types::PieceType) -> String {
-    use banqi_core::core::env::types::PieceType::*;
-    match t {
-        Soldier => "soldier",
-        Cannon => "cannon",
-        Horse => "horse",
-        Chariot => "chariot",
-        Elephant => "elephant",
-        Advisor => "advisor",
-        General => "general",
+/// 胜者字符串转前端 StepResult 的数字编码（1=红 / -1=黑 / 0=平局 / null）。
+pub fn winner_code(w: Option<&str>) -> Option<i32> {
+    match w {
+        Some("red") => Some(1),
+        Some("black") => Some(-1),
+        Some("draw") => Some(0),
+        _ => None,
     }
-    .to_string()
 }

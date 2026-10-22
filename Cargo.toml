@@ -16,8 +16,7 @@ path = "src/bin/cli.rs"
 [dependencies]
 banqi-core = { path = "../banqi-core" }
 banqi-engine = { path = "../banqi-engine" }
-# 共享应用层：MCTS 树视图 / 搜索执行 / 模型扫描（收敛 gui-server 重复逻辑）
-banqi-app = { path = "../banqi-app" }
+# 共享应用层已并入本 crate（src/app/，原 banqi-app crate，见 archive/banqi-app）
 
 axum = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
@@ -43,6 +42,6 @@ ort = { version = "=2.0.0-rc.13", features = ["download-binaries"], optional = t
 [features]
 default = ["onnx"]
 # 透传到底层推理库的 feature（与 banqi-engine 对齐）
-torch = ["banqi-engine/torch", "banqi-app/torch"]
-onnx = ["banqi-engine/onnx", "dep:ort", "banqi-app/onnx"]
+torch = ["banqi-engine/torch"]
+onnx = ["banqi-engine/onnx", "dep:ort"]
 onnx-cuda = ["onnx", "banqi-engine/onnx-cuda"]

@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use banqi_app::search::SearchBudget;
+use crate::app::search::SearchBudget;
 use banqi_core::core::env::Variant;
 
 #[derive(Debug, Clone)]
@@ -89,7 +89,7 @@ impl ServerConfig {
                         .map_err(|_| format!("--nn-cache 需要非负整数（0 = 关闭），得到: {value}"))?
                 }
                 "--nnue-mode" => {
-                    self.default_nnue.mode = banqi_app::search::BudgetMode::parse(&value)
+                    self.default_nnue.mode = crate::app::search::BudgetMode::parse(&value)
                         .ok_or_else(|| {
                             format!("--nnue-mode 未知模式: {value}（可选 nodes / depth_nodes / time）")
                         })?

@@ -7,6 +7,6 @@
 //!
 //! 生命周期：每次 AI 回合（或手动搜索）替换整棵树；不做跨回合复用
 //! （GUI 的 tree_reuse_plan 依赖具体变体的环境重放，如需可在
-//! `banqi_app::search` 中启用）。
+//! `crate::app::search` 中启用）。
 
-pub use banqi_app::mcts_view::*;
+pub use crate::app::mcts_view::*;

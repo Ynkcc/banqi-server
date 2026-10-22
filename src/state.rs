@@ -1,6 +1,6 @@
 //! 应用状态：模型池（按变体，随用随加载）、对局存储与会话（对手配置 + 版本号）。
 //!
-//! 会话核心（变体 / 局面快照 / 悔棋 / 棋谱不变量）为 `banqi_app::session::SnapshotSession`
+//! 会话核心（变体 / 局面快照 / 悔棋 / 棋谱不变量）为 `crate::app::session::SnapshotSession`
 //! （单一真源，经 `with_env!` 重建泛型环境执行——server 侧不假设变体种类）；
 //! 本 crate 的 `GameSession` 在其上叠加 server 特有的对手配置、绑定模型与搜索树。
 
@@ -10,31 +10,34 @@ use std::sync::{RwLock, Arc};
 
 use uuid::Uuid;
 
-use banqi_app::opponent::{EngineParams, OpponentKind};
-use banqi_app::search::{BudgetMode, SearchBudget};
-use banqi_app::session::SnapshotSession;
-use banqi_app::sync::{read_lock, write_lock};
+use crate::app::opponent::{EngineParams, OpponentKind};
+use crate::app::search::{BudgetMode, SearchBudget};
+use crate::app::session::SnapshotSession;
+use crate::app::sync::{read_lock, write_lock};
 use banqi_core::core::env::types::Player;
 use banqi_core::core::env::{PositionSnapshot, Variant};
 use banqi_engine::nnue::NnueEvaluator;
 
 use crate::config::ServerConfig;
-use crate::dto::{
-    piece_type_str, player_str, winner_str, ActionView, AiInfoView, CellView, GameStateResp,
-    HistoryMoveView, PieceView,
-};
+use crate::dto::{player_str, winner_str, ActionView, AiInfoView, GameStateResp, HistoryMoveView};
 use crate::error::ApiError;
 use crate::variant;
+
+/// 树复用的具体树类型（本 server 的 MCTS 搜索统一以 `DarkChessEnv` 实例化，
+/// `DarkChessEnv::from_snapshot` 按快照自带变体配置重建，所有变体通用）。
+use crate::app::mcts_view::MctsTree;
+use banqi_core::core::env::DarkChessEnv;
+
 
 // ============================================================================
 // 模型池与推理后端分派：实现收敛到 banqi-app（单一真源），此处仅别名/re-export
 // ============================================================================
 
-pub use banqi_app::models::EngineKind;
+pub use crate::app::models::EngineKind;
 
 /// 模型池：启动只**扫描**模型目录得到文件清单（不加载权重）；
 /// 按文件路径随用随加载并**常驻缓存**，供所有对局复用。
-pub type Models = banqi_app::models::ModelPool;
+pub type Models = crate::app::models::ModelPool;
 
 // ============================================================================
 // 对局会话
@@ -161,40 +164,25 @@ impl GameSession {
         self.core.undoable()
     }
 
-    /// 当前完整状态视图：中立视图 `banqi_app::view::game_view`（单一真源）→ DTO 映射。
+    /// 取出会话保留的上一棵搜索树并还原为具体类型（树复用用）。
+    ///
+    /// 搜索树由 `choose_blocking` / `choose_torch_blocking` 以 `DarkChessEnv`
+    /// 实例化（所有变体通用），还原恒成功；非搜索来源的树返回 None。
+    pub fn take_reusable_mcts_tree(&mut self) -> Option<MctsTree<DarkChessEnv>> {
+        let tree = self.mcts_tree.take()?;
+        tree.into_any()
+            .downcast::<MctsTree<DarkChessEnv>>()
+            .ok()
+            .map(|b| *b)
+    }
+
+    /// 当前完整状态视图：前端 `GameState` 契约视图（`game_state_view`，单一真源）
+    /// + server 专属扩展字段。
     pub fn view(&self, game_id: Uuid) -> GameStateResp {
-        let v = banqi_app::view::game_view(&self.core);
+        let v = crate::app::view::game_view(&self.core);
         let s = &v.scalars;
         let over = s.terminated || s.truncated;
 
-        // 棋盘视图（行优先；暗子不泄露真实身份）
-        let board: Vec<CellView> = v
-            .cells
-            .iter()
-            .map(|c| {
-                use banqi_app::view::CellState::*;
-                let (state, piece) = match c.state {
-                    Empty => ("empty", None),
-                    Hidden => ("hidden", None),
-                    Revealed => (
-                        "revealed",
-                        c.piece.map(|p| PieceView {
-                            piece_type: piece_type_str(p.piece_type),
-                            side: player_str(p.player),
-                        }),
-                    ),
-                };
-                CellView {
-                    index: c.index,
-                    row: c.row,
-                    col: c.col,
-                    state: state.to_string(),
-                    piece,
-                }
-            })
-            .collect();
-
-        // 合法动作视图
         let legal_actions: Vec<ActionView> = v
             .legal_actions
             .iter()
@@ -206,18 +194,6 @@ impl GameSession {
             })
             .collect();
 
-        // 阵亡 / 隐藏棋子列表（按型展开；hidden 计数可由公开信息推导，不泄露暗子身份）
-        let dead_red: Vec<String> = v.dead[0].iter().map(|t| piece_type_str(*t)).collect();
-        let dead_black: Vec<String> = v.dead[1].iter().map(|t| piece_type_str(*t)).collect();
-        let hidden_red: Vec<String> = v.hidden[0]
-            .iter()
-            .map(|p| piece_type_str(p.piece_type))
-            .collect();
-        let hidden_black: Vec<String> = v.hidden[1]
-            .iter()
-            .map(|p| piece_type_str(p.piece_type))
-            .collect();
-
         let ai_view = match self.opponent {
             Some(opp) => AiInfoView {
                 enabled: true,
@@ -226,6 +202,7 @@ impl GameSession {
                 engine: match opp.kind {
                     OpponentKind::Nnue => Some("nnue".to_string()),
                     OpponentKind::MctsOnnx => Some("mcts-onnx".to_string()),
+                    OpponentKind::MctsDL => Some("mcts-dl".to_string()),
                     _ => None,
                 },
                 mcts_sims: opp.mcts_sims,
@@ -259,59 +236,40 @@ impl GameSession {
             },
         };
 
-        // 决策历史（棋谱）
+        // 决策历史（棋谱；棋子为前端短码 "R_Sol" 等）
         let history: Vec<HistoryMoveView> = v
             .history
             .iter()
             .map(|e| HistoryMoveView {
                 ply: e.ply,
-                player: player_str(e.player),
+                player: crate::app::common::player_label(e.player),
                 action: e.action,
                 from: e.from,
                 to: e.to,
                 is_flip: e.is_flip,
                 is_chance: e.is_chance,
                 is_capture: e.is_capture,
-                revealed: e.revealed.map(|p| PieceView {
-                    piece_type: piece_type_str(p.piece_type),
-                    side: player_str(p.player),
-                }),
-                captured: e.captured.map(|p| PieceView {
-                    piece_type: piece_type_str(p.piece_type),
-                    side: player_str(p.player),
-                }),
+                revealed: e.revealed.map(|p| p.short_name().to_string()),
+                captured: e.captured.map(|p| p.short_name().to_string()),
             })
             .collect();
 
         GameStateResp {
+            game: crate::app::view::game_state_view(&self.core.current),
             game_id: game_id.to_string(),
-            variant: self.core.variant.as_str().to_string(),
-            fen: s.fen.clone(),
             version: self.core.version,
-            current_player: player_str(s.current_player),
-            move_count: s.move_count,
-            total_steps: s.total_steps,
             max_steps: s.max_steps,
-            red_score: s.scores[0],
-            black_score: s.scores[1],
-            red_hp: s.scores[0],
-            black_hp: s.scores[1],
             over,
             terminated: s.terminated,
             truncated: s.truncated,
             over_reason: s.over_reason.map(|r| r.as_str().to_string()),
             winner: winner_str(s.winner),
             last_action: s.last_action,
-            board,
-            dead_red,
-            dead_black,
-            hidden_red,
-            hidden_black,
             legal_actions,
             history,
             ai: ai_view,
             ai_to_move: self.opponent_to_move(),
-            undoable: self.undoable(),
+            can_undo: self.undoable(),
         }
     }
 
@@ -323,8 +281,8 @@ impl GameSession {
             game_id: game_id.to_string(),
             variant: self.core.variant.as_str().to_string(),
             version: self.core.version,
-            current_player: v.current_player,
-            total_steps: v.total_steps,
+            current_player: v.game.current_player,
+            total_steps: v.game.total_step_counter as usize,
             over: v.over,
             winner: winner_str(winner),
             ai: v.ai,
@@ -477,6 +435,19 @@ impl AppState {
             .map_err(|e| format!("模型加载任务失败: {e}"))?
     }
 
+    /// 随用随加载：按对局绑定的模型文件取 TorchScript 模型（需 torch feature）。
+    /// 加载在 blocking 线程池执行，加载后常驻缓存，供所有对局复用。
+    #[cfg(feature = "torch")]
+    pub async fn acquire_torch_model(
+        self: &Arc<Self>,
+        model_file: String,
+    ) -> Result<Arc<banqi_engine::engine::ModelWrapper>, String> {
+        let app = Arc::clone(self);
+        tokio::task::spawn_blocking(move || app.models.acquire_torch(&model_file))
+            .await
+            .map_err(|e| format!("模型加载任务失败: {e}"))?
+    }
+
     /// 随用随加载：按对局绑定的模型文件取 NNUE 评估器（解析自解释头部）。
     pub async fn acquire_nnue_model(
         self: &Arc<Self>,
@@ -512,7 +483,7 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use banqi_app::sync::{read_lock, write_lock};
+    use crate::app::sync::{read_lock, write_lock};
     use crate::config::ServerConfig;
 
     fn test_app() -> AppState {
@@ -534,7 +505,7 @@ mod tests {
         assert_eq!(app.default_variant(), Variant::ALL[0]);
         // NNUE 默认预算：模式 + 硬超时均取默认值（DepthNodes / 60s）
         let b = app.default_nnue_budget();
-        assert_eq!(b.mode, banqi_app::search::BudgetMode::DepthNodes);
+        assert_eq!(b.mode, crate::app::search::BudgetMode::DepthNodes);
         assert_eq!(b.timeout_ms, 60_000);
     }
 

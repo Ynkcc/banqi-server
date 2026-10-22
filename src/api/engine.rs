@@ -73,10 +73,11 @@ pub async fn engine_move(
                     .acquire_model(model_file)
                     .await
                     .map_err(ApiError::ModelUnavailable)?;
-                // 锁外推理（无会话状态，无版本号校验需求）
-                let Some((action, tree)) = crate::ai::choose_blocking(variant, snap, model, sims)
-                    .await
-                    .map_err(ApiError::Internal)?
+                // 锁外推理（无会话状态，无版本号校验需求；无上一棵树可复用）
+                let Some((action, tree)) =
+                    crate::ai::choose_blocking(snap, model, sims, None)
+                        .await
+                        .map_err(ApiError::Internal)?
                 else {
                     return Err(ApiError::Internal("MCTS 未返回动作（无合法动作）".into()));
                 };
@@ -88,7 +89,35 @@ pub async fn engine_move(
             {
                 let _ = (&req.mcts_sims, &snap, &model_file);
                 return Err(ApiError::ModelUnavailable(
-                    "服务编译未启用 onnx 推理，MCTS+ONNX 路径不可用（请使用 .nnue 模型）".into(),
+                    "服务编译未启用 onnx 推理，MCTS+ONNX 路径不可用（请使用 .nnue / .pt 模型）".into(),
+                ));
+            }
+        }
+        EngineKind::MctsDL => {
+            #[cfg(feature = "torch")]
+            {
+                let sims = req.mcts_sims.unwrap_or_else(|| app.default_sims()).max(1);
+                let model = app
+                    .acquire_torch_model(model_file)
+                    .await
+                    .map_err(ApiError::ModelUnavailable)?;
+                // 锁外推理（无会话状态，无版本号校验需求；无上一棵树可复用）
+                let Some((action, tree)) =
+                    crate::ai::choose_torch_blocking(snap, model, sims, None)
+                        .await
+                        .map_err(ApiError::Internal)?
+                else {
+                    return Err(ApiError::Internal("MCTS 未返回动作（无合法动作）".into()));
+                };
+                let mcts_stats = crate::dto::MctsStatsDto::from_session(Some(&tree))
+                    .ok_or_else(|| ApiError::Internal("搜索树缺少统计信息".into()))?;
+                (action, Some(mcts_stats), None)
+            }
+            #[cfg(not(feature = "torch"))]
+            {
+                let _ = (&req.mcts_sims, &snap, &model_file);
+                return Err(ApiError::ModelUnavailable(
+                    "服务编译未启用 torch 推理，MCTS+DL 路径不可用（请使用 .onnx / .nnue 模型）".into(),
                 ));
             }
         }

@@ -10,7 +10,10 @@ use axum::{Json, Router};
 
 use banqi_core::core::env::Variant;
 
-use crate::dto::{HealthResp, ModelInfo, SettingsReq, SettingsResp, VariantInfo, VariantsResp};
+use crate::dto::{
+    CapabilitiesResp, HealthResp, ModelEntryDto, ModelInfo, ModelListResp, SettingsReq,
+    SettingsResp, VariantInfo, VariantsResp,
+};
 use crate::error::ApiError;
 use crate::state::SharedState;
 use crate::web;
@@ -23,6 +26,8 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/games/{id}/ai-move", post(games::ai_move))
         .route("/api/games/{id}/undo", post(games::undo))
         .route("/api/games/{id}/model", put(games::bind_model))
+        .route("/api/games/{id}/opponent", get(games::get_opponent))
+        .route("/api/games/{id}/move-action", get(games::move_action))
         .route("/api/games/{id}/mcts/root", get(mcts::root))
         .route("/api/games/{id}/mcts/search", post(mcts::search))
         .route("/api/games/{id}/mcts/node/{node}", get(mcts::detail))
@@ -31,6 +36,8 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/health", get(health))
         .route("/api/variants", get(variants))
         .route("/api/settings", get(get_settings).put(put_settings))
+        .route("/api/capabilities", get(capabilities))
+        .route("/api/models", get(list_models))
         // 无状态引擎端点（供连线程序调用）：BFEN 局面 → MCTS+ONNX 最优动作
         .route("/api/engine/move", post(engine::engine_move))
         .with_state(state)
@@ -52,6 +59,38 @@ async fn health(State(app): State<SharedState>) -> Json<HealthResp> {
         sessions: app.config.sessions,
         device: app.config.device.clone(),
         nn_cache_entries: app.config.nn_cache_entries,
+    })
+}
+
+/// GET /api/capabilities：编译期启用的推理后端（前端据此隐藏不可用的
+/// 对手与模型类型；对应 gui `get_capabilities`）。
+async fn capabilities() -> Json<CapabilitiesResp> {
+    Json(CapabilitiesResp {
+        torch: cfg!(feature = "torch"),
+        onnx: cfg!(feature = "onnx"),
+        nnue: true,
+    })
+}
+
+/// GET /api/models：模型目录与扫描到的模型文件（含子目录，每次重扫保证最新；
+/// 对应 gui `list_models`，`dir` 供前端展示）。
+async fn list_models(State(app): State<SharedState>) -> Json<ModelListResp> {
+    let models = app
+        .models
+        .files()
+        .into_iter()
+        .map(|path| {
+            let name = std::path::Path::new(&path)
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            ModelEntryDto { name, path }
+        })
+        .collect();
+    Json(ModelListResp {
+        dir: app.config.models_dir.to_string_lossy().to_string(),
+        models,
     })
 }
 

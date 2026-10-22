@@ -3,10 +3,11 @@
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
+use serde::Deserialize;
 use uuid::Uuid;
 
-use banqi_app::opponent::OpponentKind;
-use banqi_app::sync::{read_lock, write_lock};
+use crate::app::opponent::OpponentKind;
+use crate::app::sync::{read_lock, write_lock};
 use banqi_core::core::env::types::Player;
 use banqi_core::core::env::PositionSnapshot;
 
@@ -14,7 +15,8 @@ use crate::ai;
 use crate::config::parse_variant;
 use crate::dto::{
     AppliedAction, CreateGameReq, GameCreatedResp, GameListResp, GameStateResp, GameSummary,
-    ModelBindReq, MoveReq, MoveResp, UndoReq, player_str,
+    ModelBindReq, MoveActionResp, MoveReq, MoveResp, OpponentResp, UndoReq, player_str,
+    winner_code,
 };
 use crate::error::ApiError;
 use crate::state::{EngineKind, GameSession, OpponentConfig, SharedState};
@@ -66,6 +68,20 @@ async fn build_opponent(
                     let _ = f;
                     return Err(ApiError::ModelUnavailable(
                         "服务编译未启用 onnx 推理，MCTS+ONNX 对手不可用（请选择 .nnue 模型）".into(),
+                    ));
+                }
+            }
+            OpponentKind::MctsDL => {
+                #[cfg(feature = "torch")]
+                app.acquire_torch_model(f.clone())
+                    .await
+                    .map_err(|e| ApiError::ModelUnavailable(format!("模型加载失败: {e}")))?;
+                #[cfg(not(feature = "torch"))]
+                {
+                    let _ = f;
+                    return Err(ApiError::ModelUnavailable(
+                        "服务编译未启用 torch 推理，MCTS+DL 对手不可用（请选择 .onnx / .nnue 模型）"
+                            .into(),
                     ));
                 }
             }
@@ -165,7 +181,7 @@ pub async fn create_game(
         Some(s) => {
             let kind = OpponentKind::parse(s).ok_or_else(|| {
                 ApiError::BadRequest(format!(
-                    "非法 opponent: {s}（可选 PvP / Random / RevealFirst / CaptureFirst / Engine / Nnue / MctsOnnx）"
+                    "非法 opponent: {s}（可选 PvP / Random / RevealFirst / CaptureFirst / Engine / Nnue / MctsOnnx / MctsDL）"
                 ))
             })?;
             let (opp, model) = build_opponent(&app, kind, &req, variant).await?;
@@ -173,7 +189,8 @@ pub async fn create_game(
         }
         None => {
             if req.ai_enabled.unwrap_or(true) {
-                // 传统路径：模型文件决定推理后端（`.nnue` → Nnue，其余 → MctsOnnx）
+                // 传统路径：模型文件决定推理后端（`.nnue` → Nnue，`.pt` → MctsDL，
+                // 其余 → MctsOnnx）
                 let model_file = match req.model_file.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
                     Some(f) => f.to_string(),
                     None => app.auto_match_model(variant)?,
@@ -181,6 +198,7 @@ pub async fn create_game(
                 let kind = match EngineKind::from_model_file(&model_file) {
                     EngineKind::Nnue => OpponentKind::Nnue,
                     EngineKind::MctsOnnx => OpponentKind::MctsOnnx,
+                    EngineKind::MctsDL => OpponentKind::MctsDL,
                 };
                 let (opp, model) = build_opponent(&app, kind, &req, variant).await?;
                 (Some(opp), model)
@@ -314,7 +332,15 @@ pub async fn move_piece(
         }
     }
 
-    Ok(Json(MoveResp { state, actions, mcts_stats, nnue_stats }))
+    Ok(Json(MoveResp {
+        terminated: state.terminated,
+        truncated: state.truncated,
+        winner: winner_code(state.winner.as_deref()),
+        state,
+        actions,
+        mcts_stats,
+        nnue_stats,
+    }))
 }
 
 /// POST /api/games/:id/ai-move
@@ -337,6 +363,9 @@ pub async fn ai_move(
 
     match ai::run_opponent_turn(&app, game_id, version).await? {
         Some((state, ai_action, mcts_stats, nnue_stats)) => Ok(Json(MoveResp {
+            terminated: state.terminated,
+            truncated: state.truncated,
+            winner: winner_code(state.winner.as_deref()),
             state,
             actions: vec![ai_action],
             mcts_stats,
@@ -396,6 +425,19 @@ pub async fn bind_model(
                 "服务编译未启用 onnx 推理，MCTS+ONNX 模型不可用（请绑定 .nnue 模型）".into(),
             ));
         }
+        EngineKind::MctsDL => {
+            #[cfg(feature = "torch")]
+            app.acquire_torch_model(req.model_file.clone())
+                .await
+                .map_err(|e| {
+                    ApiError::ModelUnavailable(format!("模型 {} 绑定失败: {e}", req.model_file))
+                })?;
+            #[cfg(not(feature = "torch"))]
+            return Err(ApiError::ModelUnavailable(
+                "服务编译未启用 torch 推理，TorchScript (.pt) 模型不可用（请绑定 .onnx / .nnue 模型）"
+                    .into(),
+            ));
+        }
     }
 
     // 锁 2：写入绑定（换绑模型时同步切换对手种类：PvP 之外的规则 / Engine
@@ -409,10 +451,84 @@ pub async fn bind_model(
         opp.kind = match engine {
             EngineKind::Nnue => OpponentKind::Nnue,
             EngineKind::MctsOnnx => OpponentKind::MctsOnnx,
+            EngineKind::MctsDL => OpponentKind::MctsDL,
         };
     }
     tracing::info!(game = %game_id, engine = ?engine, "对局重绑模型: {}", req.model_file);
     Ok(Json(s.view(game_id)))
+}
+
+// ============================================================================
+// 对手查询 / 坐标→动作（对齐 banqi-gui get_opponent_type / get_move_action）
+// ============================================================================
+
+/// GET /api/games/:id/opponent
+///
+/// 当前对局的对手种类（PvP 对局返回 "PvP"；对应 gui `get_opponent_type`）。
+pub async fn get_opponent(
+    State(app): State<SharedState>,
+    Path(id): Path<String>,
+) -> Result<Json<OpponentResp>, ApiError> {
+    let game_id = parse_game_id(&id)?;
+    let games = read_lock(&app.games);
+    let s = games
+        .get(&game_id)
+        .ok_or_else(|| ApiError::GameNotFound(id.clone()))?;
+    let opponent = s
+        .opponent
+        .map(|o| o.kind.as_str().to_string())
+        .unwrap_or_else(|| "PvP".to_string());
+    Ok(Json(OpponentResp { opponent }))
+}
+
+/// GET /api/games/:id/move-action?from=12&to=13
+///
+/// 坐标对 → 动作空间索引（几何映射，只取决于变体；`null` = 坐标不构成任何动作；
+/// 对应 gui `get_move_action`，内部为 O(1) 查表）。
+#[derive(Debug, Deserialize)]
+pub struct MoveActionQuery {
+    from: usize,
+    to: usize,
+}
+
+pub async fn move_action(
+    State(app): State<SharedState>,
+    Path(id): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<MoveActionQuery>,
+) -> Result<Json<MoveActionResp>, ApiError> {
+    use banqi_core::core::env::SnapshotEnv;
+
+    let game_id = parse_game_id(&id)?;
+    let games = read_lock(&app.games);
+    let s = games
+        .get(&game_id)
+        .ok_or_else(|| ApiError::GameNotFound(id.clone()))?;
+    let total = {
+        let cfg = s.core.variant.config();
+        cfg.rows * cfg.cols
+    };
+    if q.from >= total || q.to >= total {
+        return Err(ApiError::BadRequest(format!(
+            "坐标越界: from={} to={}（变体 {} 共 {total} 格）",
+            q.from,
+            q.to,
+            s.core.variant.as_str()
+        )));
+    }
+    // 几何映射只取决于变体 config（动作查找表按 config 全局缓存）：
+    // from == to → 翻棋单格动作（single_to_action）；否则坐标对查
+    // `DarkChessEnv::get_action_for_coords`（O(1)，覆盖移动 / 炮击）
+    let action = if q.from == q.to {
+        let tables =
+            banqi_core::core::env::actions::action_lookup_tables(&s.core.variant.config());
+        let a = tables.single_to_action[q.from];
+        (a >= 0).then_some(a as usize)
+    } else {
+        let env = banqi_core::core::env::DarkChessEnv::from_snapshot(&s.core.current)
+            .map_err(|e| ApiError::Internal(format!("重建环境失败: {e}")))?;
+        env.get_action_for_coords(&[q.from, q.to])
+    };
+    Ok(Json(MoveActionResp { action }))
 }
 
 /// POST /api/games/:id/undo
@@ -420,7 +536,7 @@ pub async fn undo(
     State(app): State<SharedState>,
     Path(id): Path<String>,
     Json(req): Json<UndoReq>,
-) -> Result<Json<GameStateResp>, ApiError> {
+) -> Result<Json<MoveResp>, ApiError> {
     let game_id = parse_game_id(&id)?;
 
     let mut games = write_lock(&app.games);
@@ -438,5 +554,15 @@ pub async fn undo(
             tracing::info!(game = %game_id, "悔棋至当前行棋方上次行动前");
         }
     }
-    Ok(Json(s.view(game_id)))
+    // 返回 StepResult 形状（与走子 / AI 回合一致），actions 为空（无悔棋动作）
+    let state = s.view(game_id);
+    Ok(Json(MoveResp {
+        terminated: state.terminated,
+        truncated: state.truncated,
+        winner: winner_code(state.winner.as_deref()),
+        state,
+        actions: Vec::new(),
+        mcts_stats: None,
+        nnue_stats: None,
+    }))
 }

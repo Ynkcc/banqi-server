@@ -1,35 +1,37 @@
-//! 对手回合执行：规则对手 / Engine / NNUE / MCTS+ONNX 的决策与落子。
+//! 对手回合执行：规则对手 / Engine / NNUE / MCTS+ONNX / MCTS+DL 的决策与落子。
 //!
 //! 锁纪律：handler 在锁内完成人类走子并校验版本号后立即释放锁；搜索类对手
 //! 在 blocking 线程池用快照重建的泛型环境执行（`with_env!`，变体无关）；
 //! 规则对手决策廉价，直接在锁内同步完成；完成后重取锁校验版本号，
 //! 不一致则丢弃对手结果。
 //!
-//! 对手种类由 `banqi_app::opponent::OpponentKind` 给出（单一真源）：
+//! 对手种类由 `crate::app::opponent::OpponentKind` 给出（单一真源）：
 //! - Rule（Random / RevealFirst / CaptureFirst）：`choose_simple` 锁内同步决策，无模型；
 //! - Engine：Expectimax 强引擎（`choose_simple`），blocking 线程池执行，无模型；
 //! - Nnue：迭代加深 Expectimax + NNUE 叶评估（量化前向，无外部依赖）；
-//! - MctsOnnx：Gumbel MCTS + ONNX 策略/价值网络（需 onnx feature）。
+//! - MctsOnnx：Gumbel MCTS + ONNX 策略/价值网络（需 onnx feature）；
+//! - MctsDL：Gumbel MCTS + TorchScript 策略/价值网络（需 torch feature）。
+//!
+//! 跨回合树复用：MCTS 类对手在锁 1 取出会话保留的上一棵树，沿「AI 上手 →
+//! 对手上手」推进根节点续用（`tree_reuse_plan`，对不上自动回退全新建树）；
+//! 复用尝试会消费旧树——若最终版本号校验失败结果作废，旧树不恢复（可重新搜索）。
 
 use std::sync::Arc;
 
 use uuid::Uuid;
 
+use crate::app::opponent::{OpponentKind, SimpleKind};
+use crate::app::search::{BudgetMode, SearchBudget};
+use crate::app::sync::write_lock;
+use banqi_core::core::env::{DarkChessEnv, PositionSnapshot};
+#[cfg(feature = "torch")]
+use banqi_engine::engine::ModelWrapper;
 #[cfg(feature = "onnx")]
-use banqi_app::with_env;
-use banqi_app::opponent::{OpponentKind, SimpleKind};
-use banqi_app::search::{BudgetMode, SearchBudget};
-use banqi_app::sync::{read_lock, write_lock};
-use banqi_core::core::env::DarkChessEnv;
-#[cfg(feature = "onnx")]
-use banqi_core::core::env::{PositionSnapshot, Variant};
-#[cfg(feature = "onnx")]
-use banqi_core::core::mcts::GumbelConfig;
-#[cfg(feature = "onnx")]
-use banqi_engine::inference::onnx::{OnnxEvaluator, OnnxModel};
+use banqi_engine::inference::onnx::OnnxModel;
 use banqi_engine::nnue::NnueEvaluator;
 
 use crate::dto::{player_str, AppliedAction, GameStateResp, MctsStatsDto, NnueStatsDto};
+use crate::mcts::MctsTree;
 #[cfg(feature = "onnx")]
 use crate::mcts::MctsTreeBox;
 use crate::error::ApiError;
@@ -37,41 +39,58 @@ use crate::state::{AppState, OpponentConfig};
 
 /// 在 blocking 线程池内执行一次 MCTS+ONNX 决策，并保留整棵搜索树。
 ///
-/// 变体无关：由 `(变体, 快照)` 重建泛型环境后运行 Gumbel MCTS（机会节点由
-/// core 内部处理）。搜索核心在 `banqi_app::search::run_gumbel`（单一真源）。
-/// 返回 `(选择的动作, 变体擦除后的树)`。
+/// 变体无关：`DarkChessEnv::from_snapshot` 按快照自带变体配置重建环境
+/// （所有变体通用），运行 Gumbel MCTS（机会节点由 core 内部处理）。
+/// 搜索核心在 `crate::app::search::mcts_search_onnx`（单一真源）；
+/// `prev_tree` 为上一棵搜索树（`DarkChessEnv` 实例化，与返回类型一致），
+/// 非空时尝试跨回合树复用（对不上自动回退全新建树）。
+/// 返回 `(选择的动作, 保留的搜索树)`。
 #[cfg(feature = "onnx")]
 pub(crate) async fn choose_blocking(
-    variant: Variant,
     snap: PositionSnapshot,
     model: Arc<OnnxModel>,
     sims: usize,
+    prev_tree: Option<MctsTree<DarkChessEnv>>,
 ) -> Result<Option<(usize, MctsTreeBox)>, String> {
     let joined = tokio::task::spawn_blocking(move || {
-        with_env!(variant, &snap, env => {
-            (|| -> Result<Option<(usize, MctsTreeBox)>, String> {
-                let evaluator = OnnxEvaluator::<E>::new(model.clone());
-                let tree = banqi_app::search::run_gumbel(
-                    &env,
-                    &evaluator,
-                    GumbelConfig::for_play(sims),
-                    None,
-                )?;
-                Ok(Some((tree.chosen_action, Box::new(tree) as MctsTreeBox)))
-            })()
-        })
+        use banqi_core::core::env::SnapshotEnv;
+
+        let env = DarkChessEnv::from_snapshot(&snap).map_err(|e| format!("重建环境失败: {e}"))?;
+        let tree = crate::app::search::mcts_search_onnx(&env, sims, Some(model), prev_tree)?;
+        Ok(Some((tree.chosen_action, Box::new(tree) as MctsTreeBox)))
     })
     .await
     .map_err(|e| format!("blocking 任务 join 失败: {e}"))?;
     joined
-        .map_err(|e| format!("重建环境失败: {e}"))
-        .and_then(std::convert::identity)
+}
+
+/// 在 blocking 线程池内执行一次 MCTS+DL（TorchScript）决策，并保留整棵搜索树。
+///
+/// 搜索核心在 `crate::app::search::mcts_search_torch`（单一真源）；
+/// 树复用语义同 [`choose_blocking`]。返回 `(选择的动作, 保留的搜索树)`。
+#[cfg(feature = "torch")]
+pub(crate) async fn choose_torch_blocking(
+    snap: PositionSnapshot,
+    model: Arc<ModelWrapper>,
+    sims: usize,
+    prev_tree: Option<MctsTree<DarkChessEnv>>,
+) -> Result<Option<(usize, MctsTreeBox)>, String> {
+    let joined = tokio::task::spawn_blocking(move || {
+        use banqi_core::core::env::SnapshotEnv;
+
+        let env = DarkChessEnv::from_snapshot(&snap).map_err(|e| format!("重建环境失败: {e}"))?;
+        let tree = crate::app::search::mcts_search_torch(&env, sims, Some(model), prev_tree)?;
+        Ok(Some((tree.chosen_action, Box::new(tree) as MctsTreeBox)))
+    })
+    .await
+    .map_err(|e| format!("blocking 任务 join 失败: {e}"))?;
+    joined
 }
 
 /// 在 blocking 线程池内执行一次 Expectimax+NNUE 决策。
 ///
 /// `DarkChessEnv::from_snapshot` 按快照自带变体配置重建环境（所有变体通用），
-/// 搜索核心在 `banqi_app::search::nnue_search`（含 `.nnue` 头部布局校验，
+/// 搜索核心在 `crate::app::search::nnue_search`（含 `.nnue` 头部布局校验，
 /// 跨变体权重硬失败）。返回 `(选择的动作, 搜索统计)`。
 pub(crate) async fn choose_nnue_blocking(
     snap: PositionSnapshot,
@@ -83,7 +102,7 @@ pub(crate) async fn choose_nnue_blocking(
 
         let env = DarkChessEnv::from_snapshot(&snap)
             .map_err(|e| format!("重建环境失败: {e}"))?;
-        banqi_app::search::nnue_search(&env, evaluator, budget)
+        crate::app::search::nnue_search(&env, evaluator, budget)
     })
     .await
     .map_err(|e| format!("blocking 任务 join 失败: {e}"))?;
@@ -104,9 +123,8 @@ pub(crate) async fn choose_nnue_blocking(
 }
 
 /// 对手回合决策所需数据（锁 1 内取出，不跨 await）。
+#[cfg_attr(not(any(feature = "onnx", feature = "torch")), allow(dead_code))]
 struct TurnPlan {
-    #[cfg(feature = "onnx")]
-    variant: Variant,
     snap: banqi_core::core::env::PositionSnapshot,
     kind: OpponentKind,
     model_file: Option<String>,
@@ -114,6 +132,8 @@ struct TurnPlan {
     engine_budget: u64,
     /// Expectimax 搜索预算（Nnue 全量；Engine 取节点预算 + 硬超时）
     search_budget: SearchBudget,
+    /// MCTS 类对手：锁 1 取出的上一棵搜索树（树复用用；其余对手为 None）
+    prev_tree: Option<MctsTree<DarkChessEnv>>,
     /// 规则对手：锁内已完成的同步决策结果（其余对手为 None）
     ready_action: Option<usize>,
 }
@@ -127,9 +147,10 @@ fn plan_opponent_turn(
     game_id: Uuid,
     expect_version: u64,
 ) -> Result<TurnPlan, ApiError> {
-    let games = read_lock(&app.games);
+    // 写锁：MCTS 类对手需取出上一棵树供复用（其余对手树保持原位）
+    let mut games = write_lock(&app.games);
     let s = games
-        .get(&game_id)
+        .get_mut(&game_id)
         .ok_or_else(|| ApiError::GameNotFound(game_id.to_string()))?;
     let opp: OpponentConfig = s.opponent.ok_or(ApiError::AiDisabled)?;
     if s.over_state().0 || s.over_state().1 {
@@ -144,19 +165,25 @@ fn plan_opponent_turn(
             s.core.version
         )));
     }
+    // MCTS 类对手：锁 1 取出上一棵树供复用（非 MCTS 对手保留原树不动，
+    // 前端仍可浏览上次决策）
+    let prev_tree = if matches!(opp.kind, OpponentKind::MctsOnnx | OpponentKind::MctsDL) {
+        s.take_reusable_mcts_tree()
+    } else {
+        None
+    };
     let plan = TurnPlan {
-        #[cfg(feature = "onnx")]
-        variant: s.core.variant,
         snap: s.core.current.clone(),
         kind: opp.kind,
         model_file: s.model_file.clone(),
         mcts_sims: opp.mcts_sims,
         engine_budget: opp.engine_budget,
         search_budget: opp.search_budget,
+        prev_tree,
         ready_action: None,
     };
     if let OpponentKind::Rule(rule) = opp.kind {
-        let action = banqi_app::opponent::choose_simple(
+        let action = crate::app::opponent::choose_simple(
             SimpleKind::Rule(rule),
             &s.core.current,
             &opp.search_budget,
@@ -249,7 +276,7 @@ pub async fn run_opponent_turn(
                 ..Default::default()
             };
             let action = tokio::task::spawn_blocking(move || {
-                banqi_app::opponent::choose_simple(SimpleKind::Engine, &snap, &budget)
+                crate::app::opponent::choose_simple(SimpleKind::Engine, &snap, &budget)
             })
             .await
             .map_err(|e| ApiError::Internal(format!("blocking 任务 join 失败: {e}")))?
@@ -288,10 +315,47 @@ pub async fn run_opponent_turn(
                     .acquire_model(model_file)
                     .await
                     .map_err(ApiError::ModelUnavailable)?;
-                let Some((action, tree)) =
-                    choose_blocking(plan.variant, plan.snap, model, plan.mcts_sims)
-                        .await
-                        .map_err(ApiError::Internal)?
+                let Some((action, tree)) = choose_blocking(
+                    plan.snap,
+                    model,
+                    plan.mcts_sims,
+                    plan.prev_tree,
+                )
+                .await
+                .map_err(ApiError::Internal)?
+                else {
+                    return Err(ApiError::Internal(
+                        "MCTS 未返回动作（终局判定与状态不一致）".to_string(),
+                    ));
+                };
+                (action, Some(tree), None)
+            }
+        }
+        OpponentKind::MctsDL => {
+            #[cfg(not(feature = "torch"))]
+            {
+                return Err(ApiError::ModelUnavailable(
+                    "服务编译未启用 torch 推理，MCTS+DL 对手不可用（其余对手仍可用）".into(),
+                ));
+            }
+            #[cfg(feature = "torch")]
+            {
+                let model_file = plan
+                    .model_file
+                    .clone()
+                    .ok_or_else(|| ApiError::BadRequest("对局未绑定模型文件".into()))?;
+                let model = app
+                    .acquire_torch_model(model_file)
+                    .await
+                    .map_err(ApiError::ModelUnavailable)?;
+                let Some((action, tree)) = choose_torch_blocking(
+                    plan.snap,
+                    model,
+                    plan.mcts_sims,
+                    plan.prev_tree,
+                )
+                .await
+                .map_err(ApiError::Internal)?
                 else {
                     return Err(ApiError::Internal(
                         "MCTS 未返回动作（终局判定与状态不一致）".to_string(),

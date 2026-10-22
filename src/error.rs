@@ -92,16 +92,16 @@ impl From<banqi_core::core::env::error::EnvError> for ApiError {
     }
 }
 
-/// 会话核心错误（banqi_app::session）→ API 错误：语义一一对应。
-impl From<banqi_app::session::SessionError> for ApiError {
-    fn from(e: banqi_app::session::SessionError) -> Self {
+/// 会话核心错误（crate::app::session）→ API 错误：语义一一对应。
+impl From<crate::app::session::SessionError> for ApiError {
+    fn from(e: crate::app::session::SessionError) -> Self {
         match e {
-            banqi_app::session::SessionError::GameOver => ApiError::GameOver,
-            banqi_app::session::SessionError::IllegalAction { action } => {
+            crate::app::session::SessionError::GameOver => ApiError::GameOver,
+            crate::app::session::SessionError::IllegalAction { action } => {
                 ApiError::IllegalAction { action }
             }
-            banqi_app::session::SessionError::BadRequest(s) => ApiError::BadRequest(s),
-            banqi_app::session::SessionError::Internal(s) => ApiError::Internal(s),
+            crate::app::session::SessionError::BadRequest(s) => ApiError::BadRequest(s),
+            crate::app::session::SessionError::Internal(s) => ApiError::Internal(s),
         }
     }
 }

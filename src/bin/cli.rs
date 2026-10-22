@@ -349,9 +349,9 @@ fn resolve_action(cli: &Client, id: &str, action: &str) -> Result<usize, String>
 
     let state = cli.get(&format!("/api/games/{id}"))?;
     let legal = state
-        .get("legalActions")
+        .get("legal_actions")
         .and_then(Value::as_array)
-        .ok_or_else(|| "对局状态缺少 legalActions 字段".to_string())?;
+        .ok_or_else(|| "对局状态缺少 legal_actions 字段".to_string())?;
     let matched: Vec<usize> = legal
         .iter()
         .filter(|a| {
