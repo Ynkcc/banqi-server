@@ -1,30 +1,6 @@
-//! banqi-cli — banqi-server 的命令行客户端（LLM / 脚本测试友好，替代 curl）。
-//!
-//! 仅是 REST API 的薄封装：不内嵌引擎、不持有状态，直连运行中的 banqi-server，
-//! 所有响应以 pretty JSON 打印到 stdout，错误打到 stderr 并以非零码退出。
-//! 服务器地址优先级：`--url` > 环境变量 `BANQI_URL` > 默认 `http://127.0.0.1:8080`。
-//!
-//! 常用示例：
-//! ```text
-//! banqi-cli health
-//! banqi-cli new --black nnue --model a.nnue       # 创建对局（红=本人，黑=策略），返回含 gameId
-//! banqi-cli move <id> 42                          # 按 action 索引走子
-//! banqi-cli move <id> 3:7                         # 按 from:to 自动匹配合法动作
-//! banqi-cli run <id>                              # 当前方按其策略执行一步
-//! banqi-cli dry-run <id>                          # 当前方策略建议走法（不落子）
-//! banqi-cli slots <id> --red human --black random # 对局中切换槽位
-//! banqi-cli undo <id>                             # 悔棋到当前行棋方上次行动前
-//! banqi-cli engine "<BFEN>" --model dark_chess_4x8.nnue   # 无状态引擎查询
-//! banqi-cli mcts root <id>                        # 查看搜索树根节点
-//! ```
-
-use std::process::ExitCode;
-
 use clap::{Parser, Subcommand};
-use serde_json::{json, Value};
-
-// CLI 定义
-
+use serde_json::{Value, json};
+use std::process::ExitCode;
 #[derive(Parser)]
 #[command(
     name = "banqi-cli",
@@ -32,7 +8,6 @@ use serde_json::{json, Value};
     about = "banqi-server 命令行客户端：REST API 的薄封装（LLM / 脚本测试用，替代 curl）"
 )]
 struct Cli {
-    /// 服务器基础地址（优先级：--url > 环境变量 BANQI_URL > 默认值）
     #[arg(
         long,
         global = true,
@@ -41,209 +16,143 @@ struct Cli {
         default_value = "http://127.0.0.1:8080"
     )]
     url: String,
-
     #[command(subcommand)]
     cmd: Cmd,
 }
-
 #[derive(Subcommand)]
 enum Cmd {
-    /// 健康检查（GET /api/health，含模型文件清单）
     Health,
-    /// 列出全部棋盘变体（GET /api/variants）
     Variants,
-    /// 读取 / 修改服务器运行时设置（GET / PUT /api/settings）
     Settings {
         #[command(subcommand)]
         cmd: SettingsCmd,
     },
-    /// 列出进行中的对局（GET /api/games）
     Games,
-    /// 创建对局（POST /api/games），返回含 gameId 的完整状态
     New {
-        /// 棋盘变体 ID（缺省取服务器默认）
         #[arg(long)]
         variant: Option<String>,
-        /// 红方槽位：human / random / reveal_first / capture_first / engine / nnue / mcts_onnx
         #[arg(long)]
         red: Option<String>,
-        /// 黑方槽位：human / random / reveal_first / capture_first / engine / nnue / mcts_onnx
         #[arg(long)]
         black: Option<String>,
-        /// 模型类策略绑定的模型文件（须在服务器模型目录内；缺省按变体自动匹配）
         #[arg(long, alias = "model")]
         model_file: Option<String>,
-        /// BFEN 局面串：由该局面重建对局（变体以 BFEN 自带标识为准）
         #[arg(long)]
         fen: Option<String>,
-        /// MCTS 模拟次数（Mcts 类策略）
         #[arg(long)]
         mcts_sims: Option<usize>,
-        /// Expectimax 强引擎节点预算
         #[arg(long)]
         engine_budget: Option<u64>,
-        /// Expectimax 预算模式：nodes / depth_nodes / time
         #[arg(long)]
         nnue_mode: Option<String>,
-        /// Expectimax 搜索深度（depth_nodes 模式）
         #[arg(long)]
         nnue_depth: Option<i32>,
-        /// Expectimax 节点预算（nodes / depth_nodes 模式）
         #[arg(long)]
         nnue_budget: Option<u64>,
-        /// Expectimax 时间预算毫秒（time 模式）
         #[arg(long)]
         nnue_time_ms: Option<u64>,
-        /// 搜索硬超时毫秒
         #[arg(long)]
         search_timeout_ms: Option<u64>,
     },
-    /// 查看对局完整状态（GET /api/games/:id）
-    Show { id: String },
-    /// 走子（POST /api/games/:id/move）。ACTION 可以是：
-    /// action 索引（如 42），或 from:to / from-to 格式（如 3:7，
-    /// 自动在对局合法动作中匹配；翻棋时 from == to）
+    Show {
+        id: String,
+    },
     Move {
         id: String,
-        /// action 索引，或 from:to / from-to
         action: String,
     },
-    /// 单步推进（POST /api/games/:id/run）：当前行棋方按其策略执行一步
-    Run { id: String },
-    /// dry-run（POST /api/games/:id/dry-run）：当前方策略建议走法（不落子）。
-    /// Human 方可加 --kind 指定提示策略
+    Run {
+        id: String,
+    },
     DryRun {
         id: String,
-        /// 提示策略种类（仅当前方为 Human 时生效；缺省 Expectimax）
         #[arg(long)]
         kind: Option<String>,
-        /// 提示策略的模型文件（模型类策略需要；缺省按变体自动匹配）
         #[arg(long, alias = "model")]
         model_file: Option<String>,
     },
-    /// 悔棋（POST /api/games/:id/undo）。STEPS 缺省 = 悔到当前行棋方上次行动前
     Undo {
         id: String,
-        /// 显式回退步数（按快照逐帧回退）
         steps: Option<usize>,
     },
-    /// 对局中切换槽位（PUT /api/games/:id/slots，只更新给出的方）
     Slots {
         id: String,
-        /// 红方槽位：human / random / reveal_first / capture_first / engine / nnue / mcts_onnx
         #[arg(long)]
         red: Option<String>,
-        /// 黑方槽位：human / random / reveal_first / capture_first / engine / nnue / mcts_onnx
         #[arg(long)]
         black: Option<String>,
-        /// 模型类策略绑定的模型文件（缺省按变体自动匹配）
         #[arg(long, alias = "model")]
         model_file: Option<String>,
     },
-    /// 删除对局（DELETE /api/games/:id）
-    Delete { id: String },
-    /// 无状态引擎查询（POST /api/engine/move）：BFEN 局面 → 引擎最优动作，
-    /// 不落子、无会话状态（连线程序 / 单步测试用）
+    Delete {
+        id: String,
+    },
     Engine {
-        /// 局面 BFEN 串（变体以 BFEN 自带标识为准）
         fen: String,
-        /// 模型文件（.onnx / .nnue 均可；缺省按变体自动匹配）
         #[arg(long, alias = "model")]
         model_file: Option<String>,
-        /// MCTS 模拟次数（.onnx 模型）
         #[arg(long)]
         mcts_sims: Option<usize>,
-        /// NNUE 预算模式：nodes / depth_nodes / time
         #[arg(long)]
         nnue_mode: Option<String>,
-        /// NNUE 搜索深度
         #[arg(long)]
         nnue_depth: Option<i32>,
-        /// NNUE 节点预算
         #[arg(long)]
         nnue_budget: Option<u64>,
-        /// NNUE 时间预算毫秒
         #[arg(long)]
         nnue_time_ms: Option<u64>,
-        /// 搜索硬超时毫秒
         #[arg(long)]
         search_timeout_ms: Option<u64>,
     },
-    /// MCTS 搜索树查询（树由 AI 回合 / 手动搜索保留在对局会话中）
     Mcts {
         #[command(subcommand)]
         cmd: MctsCmd,
     },
 }
-
 #[derive(Subcommand)]
 enum SettingsCmd {
-    /// 读取当前设置
     Get,
-    /// 修改设置（缺省字段不修改，只覆盖显式给出的字段）
     Set {
-        /// 默认 MCTS 搜索预算（模拟次数）
         #[arg(long)]
         mcts_sims: Option<usize>,
-        /// 默认 Expectimax 强引擎节点预算
         #[arg(long)]
         engine_budget: Option<u64>,
-        /// 默认 NNUE 预算模式：nodes / depth_nodes / time
         #[arg(long)]
         nnue_mode: Option<String>,
-        /// 默认 NNUE 搜索深度
         #[arg(long)]
         nnue_depth: Option<i32>,
-        /// 默认 NNUE 节点预算
         #[arg(long)]
         nnue_budget: Option<u64>,
-        /// 默认 NNUE 时间预算毫秒
         #[arg(long)]
         nnue_time_ms: Option<u64>,
-        /// 默认搜索硬超时毫秒
         #[arg(long)]
         search_timeout_ms: Option<u64>,
     },
 }
-
 #[derive(Subcommand)]
 enum MctsCmd {
-    /// 根节点信息（GET /api/games/:id/mcts/root）
     Root { id: String },
-    /// 在当前局面上手动触发一次搜索（POST /api/games/:id/mcts/search，不走子）
     Search { id: String },
-    /// 节点详情（GET /api/games/:id/mcts/node/:node）
     Node { id: String, node: usize },
-    /// 子节点列表（GET /api/games/:id/mcts/node/:node/children）
     Children { id: String, node: usize },
-    /// 节点局面（GET /api/games/:id/mcts/node/:node/board）
     Board { id: String, node: usize },
 }
-
-// HTTP 客户端
-
-/// 薄封装的阻塞式 HTTP 客户端：统一处理地址拼接 / 错误体解析。
 struct Client {
     base: String,
     http: reqwest::blocking::Client,
 }
-
 impl Client {
     fn new(base: &str) -> Self {
         Self {
             base: base.trim_end_matches('/').to_string(),
             http: reqwest::blocking::Client::builder()
-                // AI 回合可能耗时长（MCTS / NNUE 搜索），不设客户端超时
                 .build()
                 .expect("构建 HTTP 客户端失败"),
         }
     }
-
     fn url(&self, path: &str) -> String {
         format!("{}{}", self.base, path)
     }
-
-    /// 发送请求并解析响应：2xx → JSON（204 → None）；非 2xx → Err（带错误码与消息）。
     fn send(&self, method: &str, path: &str, body: Option<Value>) -> Result<Option<Value>, String> {
         let url = self.url(path);
         let req = match method {
@@ -260,7 +169,6 @@ impl Client {
         let resp = req
             .send()
             .map_err(|e| format!("请求失败（服务器未启动？地址 {url}）: {e}"))?;
-
         let status = resp.status();
         if status == reqwest::StatusCode::NO_CONTENT {
             return Ok(None);
@@ -268,7 +176,6 @@ impl Client {
         let text = resp.text().map_err(|e| format!("读取响应失败: {e}"))?;
         let parsed: Value = serde_json::from_str(&text)
             .unwrap_or_else(|_| Value::String(format!("非 JSON 响应: {text}")));
-
         if !status.is_success() {
             let code = parsed
                 .pointer("/error/code")
@@ -282,27 +189,19 @@ impl Client {
         }
         Ok(Some(parsed))
     }
-
     fn get(&self, path: &str) -> Result<Value, String> {
-        self.send("GET", path, None)?.ok_or_else(|| {
-            "内部错误：服务器对 GET 请求返回 204".to_string()
-        })
+        self.send("GET", path, None)?
+            .ok_or_else(|| "内部错误：服务器对 GET 请求返回 204".to_string())
     }
-
     fn post(&self, path: &str, body: Option<Value>) -> Result<Value, String> {
         self.send("POST", path, body)?
             .ok_or_else(|| "内部错误：服务器对 POST 请求返回 204".to_string())
     }
-
     fn put(&self, path: &str, body: Value) -> Result<Value, String> {
         self.send("PUT", path, Some(body))?
             .ok_or_else(|| "内部错误：服务器对 PUT 请求返回 204".to_string())
     }
 }
-
-// 请求体构建 / action 解析
-
-/// Option 序列化辅助：Some(v) → 插入字段，None → 跳过。
 macro_rules! set_opt {
     ($obj:expr, $key:literal, $field:expr) => {
         if let Some(v) = $field {
@@ -310,8 +209,6 @@ macro_rules! set_opt {
         }
     };
 }
-
-/// 单槽位请求体（kind 缺省 = Human；模型/参数仅在策略槽位时附带）。
 #[allow(clippy::too_many_arguments)]
 fn slot_body(
     kind: &Option<String>,
@@ -346,8 +243,6 @@ fn slot_body(
     }
     s
 }
-
-/// CLI 建局 / 换槽位请求体：双方槽位 + 引擎参数逐项透传。
 #[allow(clippy::too_many_arguments)]
 fn slots_body(
     red: &Option<String>,
@@ -395,10 +290,6 @@ fn slots_body(
     }
     b
 }
-
-/// 解析 move 的 ACTION 参数：
-/// - 纯数字 → action 索引；
-/// - `from:to` / `from-to` → 在对局合法动作中按源/目标格匹配（翻棋 from == to）。
 fn resolve_action(cli: &Client, id: &str, action: &str) -> Result<usize, String> {
     if let Ok(idx) = action.parse::<usize>() {
         return Ok(idx);
@@ -407,9 +298,7 @@ fn resolve_action(cli: &Client, id: &str, action: &str) -> Result<usize, String>
         .split_once(':')
         .or_else(|| action.split_once('-'))
         .ok_or_else(|| {
-            format!(
-                "非法 action: {action}（应为 action 索引，或 from:to / from-to 格式）"
-            )
+            format!("非法 action: {action}（应为 action 索引，或 from:to / from-to 格式）")
         })?;
     let from: usize = from_s
         .trim()
@@ -419,7 +308,6 @@ fn resolve_action(cli: &Client, id: &str, action: &str) -> Result<usize, String>
         .trim()
         .parse()
         .map_err(|_| format!("非法 to 格位: {to_s}"))?;
-
     let state = cli.get(&format!("/api/games/{id}"))?;
     let legal = state
         .get("legal_actions")
@@ -443,9 +331,6 @@ fn resolve_action(cli: &Client, id: &str, action: &str) -> Result<usize, String>
         _ => Ok(matched[0]),
     }
 }
-
-// 入口
-
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match run(&cli.url, cli.cmd) {
@@ -461,8 +346,6 @@ fn main() -> ExitCode {
         }
     }
 }
-
-/// 执行子命令；Some(text) 为要打印的响应文本（pretty JSON）。
 fn run(base_url: &str, cmd: Cmd) -> Result<Option<String>, String> {
     let cli = Client::new(base_url);
     let print = |v: Value| -> Result<Option<String>, String> {
@@ -470,7 +353,6 @@ fn run(base_url: &str, cmd: Cmd) -> Result<Option<String>, String> {
             .map(Some)
             .map_err(|e| format!("序列化响应失败: {e}"))
     };
-
     match cmd {
         Cmd::Health => print(cli.get("/api/health")?),
         Cmd::Variants => print(cli.get("/api/variants")?),
@@ -530,10 +412,17 @@ fn run(base_url: &str, cmd: Cmd) -> Result<Option<String>, String> {
         Cmd::Show { id } => print(cli.get(&format!("/api/games/{id}"))?),
         Cmd::Move { id, action } => {
             let idx = resolve_action(&cli, &id, &action)?;
-            print(cli.post(&format!("/api/games/{id}/move"), Some(json!({ "action": idx })))?)
+            print(cli.post(
+                &format!("/api/games/{id}/move"),
+                Some(json!({ "action": idx })),
+            )?)
         }
         Cmd::Run { id } => print(cli.post(&format!("/api/games/{id}/run"), None)?),
-        Cmd::DryRun { id, kind, model_file } => {
+        Cmd::DryRun {
+            id,
+            kind,
+            model_file,
+        } => {
             let mut b = json!({});
             set_opt!(b, "kind", kind);
             set_opt!(b, "modelFile", model_file);
@@ -546,7 +435,12 @@ fn run(base_url: &str, cmd: Cmd) -> Result<Option<String>, String> {
             };
             print(cli.post(&format!("/api/games/{id}/undo"), Some(body))?)
         }
-        Cmd::Slots { id, red, black, model_file } => print(cli.put(
+        Cmd::Slots {
+            id,
+            red,
+            black,
+            model_file,
+        } => print(cli.put(
             &format!("/api/games/{id}/slots"),
             slots_body(
                 &red,
@@ -562,7 +456,6 @@ fn run(base_url: &str, cmd: Cmd) -> Result<Option<String>, String> {
             ),
         )?),
         Cmd::Delete { id } => {
-            // DELETE 返回 204（无响应体）
             cli.send("DELETE", &format!("/api/games/{id}"), None)?;
             println!("对局 {id} 已删除");
             Ok(None)

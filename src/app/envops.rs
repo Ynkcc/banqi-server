@@ -1,30 +1,11 @@
-//! 变体无关的环境操作层（共享）。
-//!
-//! 由 banqi-server/src/variant.rs 收敛而来（原样平移，纯逻辑零依赖 axum/tokio）：
-//! 设计约束是不假设变体种类。变体 → 环境类型的分发完全复用 banqi-core 的
-//! `for_variant_env!` 宏（core 内单一真源），所有操作实现为仅依赖
-//! `GameEnv` / `SnapshotEnv` trait 与 `GameConfig` 的泛型函数。
-//! banqi-core 新增变体时，本模块零改动。
-
 use banqi_core::core::env::actions::action_lookup_tables;
 use banqi_core::core::env::error::EnvError;
 use banqi_core::core::env::{GameEnv, PositionSnapshot, SnapshotEnv, Variant};
-
-/// 由 `(变体, 快照)` 重建泛型环境并执行 `$body`。
-///
-/// 展开为 `for_variant_env!` 的 match 分发 + `SnapshotEnv::from_snapshot` 精确重建。
-/// `$body` 在各分支中返回相同类型 `R`，整体返回 `Result<R, EnvError>`
-/// （快照载荷非法 / 变体不符时为 Err）。
-///
-/// ```ignore
-/// let legal: Vec<usize> = crate::app::with_env!(variant, &snap, env => legal_actions(&env))?;
-/// ```
 #[macro_export]
 macro_rules! with_env {
     ($variant:expr, $snap:expr, $e:ident => $body:expr) => {
         banqi_core::for_variant_env!($variant, E => {
             <E as banqi_core::core::env::SnapshotEnv>::from_snapshot($snap).map(|$e| {
-                // 统一以可变绑定提供（部分调用点需要 step），未变异的调用点不告警
                 #[allow(unused_mut)]
                 let mut $e = $e;
                 $body
@@ -32,22 +13,11 @@ macro_rules! with_env {
         })
     };
 }
-
-// 基础操作（泛型，仅依赖 trait）
-
-/// 按变体创建初始局面的完整快照。
 pub fn initial_snapshot(variant: Variant) -> PositionSnapshot {
     banqi_core::for_variant_env!(variant, E => {
         <E as Default>::default().to_snapshot()
     })
 }
-
-/// 按变体 + 可选开局场景创建初始局面的完整快照。
-///
-/// `scenario = None` 时与 [`initial_snapshot`] 一致；传场景时经
-/// `DarkChessEnv::with_config_and_scenario` 按变体基准配置构造后取快照
-/// （各变体环境均为 DarkChessEnv 配置变体的包装，快照形状一致）。
-/// 变体不支持该场景 / 场景参数非法时返回错误（调用方映射为 400）。
 pub fn initial_snapshot_with_scenario(
     variant: Variant,
     scenario: Option<&banqi_core::core::env::OpeningScenario>,
@@ -61,14 +31,10 @@ pub fn initial_snapshot_with_scenario(
             context: "该变体不支持此开局场景",
         });
     }
-    let env = banqi_core::core::env::DarkChessEnv::with_config_and_scenario(
-        variant.config(),
-        Some(*s),
-    )?;
+    let env =
+        banqi_core::core::env::DarkChessEnv::with_config_and_scenario(variant.config(), Some(*s))?;
     Ok(env.to_snapshot())
 }
-
-/// 当前合法动作列表（升序）。
 pub fn legal_actions<E: GameEnv>(env: &E) -> Vec<usize> {
     let n = env.action_space_size();
     let mut masks = vec![0i32; n];
@@ -80,24 +46,17 @@ pub fn legal_actions<E: GameEnv>(env: &E) -> Vec<usize> {
         .map(|(a, _)| a)
         .collect()
 }
-
-/// `GameEnv::step` 的结果（与 trait 返回值一一对应，便于上层使用）。
 #[derive(Clone, Copy, Debug)]
 pub struct StepOutcome {
     pub terminated: bool,
     pub truncated: bool,
-    /// 全局视角：Some(1)=红/先手胜，Some(-1)=黑/后手胜，Some(0)=平局，None=未结束。
     pub winner: Option<i32>,
 }
-
 impl StepOutcome {
-    /// 对局是否结束（terminated 或 truncated）。
     pub fn is_over(&self) -> bool {
         self.terminated || self.truncated
     }
 }
-
-/// 执行动作（含翻棋等机会动作；机会结果由环境内部按概率随机决定）。
 pub fn step<E: GameEnv>(env: &mut E, action: usize) -> Result<StepOutcome, EnvError> {
     let (_, terminated, truncated, winner) = env.step(action)?;
     Ok(StepOutcome {
@@ -106,16 +65,9 @@ pub fn step<E: GameEnv>(env: &mut E, action: usize) -> Result<StepOutcome, EnvEr
         winner,
     })
 }
-
-/// 终局判定：`(terminated, truncated, winner)`。
 pub fn game_over<E: GameEnv>(env: &E) -> (bool, bool, Option<i32>) {
     env.check_game_over_conditions()
 }
-
-// 动作坐标与特征维度（纯 config 推导）
-
-/// 动作对应的坐标 `[from, to]`（翻棋时 from == to）；
-/// 经 `action_lookup_tables(&config)` 公开 API 查询，不依赖具体环境类型。
 pub fn coords_for_action(variant: Variant, action: usize) -> Option<Vec<usize>> {
     action_lookup_tables(&variant.config())
         .action_to_coords
