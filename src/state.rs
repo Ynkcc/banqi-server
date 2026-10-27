@@ -14,7 +14,7 @@ use banqi_core::core::env::DarkChessEnv;
 use banqi_core::core::env::{PositionSnapshot, Variant};
 use banqi_engine::nnue::NnueEvaluator;
 use std::collections::{HashMap, VecDeque};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 use uuid::Uuid;
 pub type Models = crate::app::models::ModelPool;
@@ -29,6 +29,8 @@ pub struct GameSession {
     pub slots: Slots,
     pub mcts_tree: Option<crate::mcts::MctsTreeBox>,
     pub expectimax_tree: Option<crate::app::expectimax_view::ExpectimaxTree>,
+
+    pub step_stats: Vec<Option<crate::dto::StepStatsDto>>,
     pub created_at: u64,
 }
 impl GameSession {
@@ -39,6 +41,7 @@ impl GameSession {
             slots,
             mcts_tree: None,
             expectimax_tree: None,
+            step_stats: Vec::new(),
             created_at: unix_now(),
         }
     }
@@ -53,6 +56,7 @@ impl GameSession {
             slots,
             mcts_tree: None,
             expectimax_tree: None,
+            step_stats: Vec::new(),
             created_at: unix_now(),
         })
     }
@@ -62,6 +66,7 @@ impl GameSession {
             slots,
             mcts_tree: None,
             expectimax_tree: None,
+            step_stats: Vec::new(),
             created_at: unix_now(),
         }
     }
@@ -72,10 +77,23 @@ impl GameSession {
         self.core.apply_action(action).map_err(ApiError::from)
     }
     pub fn undo(&mut self, steps: usize) -> Result<(), ApiError> {
-        self.core.undo_steps(steps).map_err(ApiError::from)
+        self.core.undo_steps(steps).map_err(ApiError::from)?;
+        self.step_stats.truncate(self.core.history.records().len());
+        Ok(())
     }
     pub fn undo_to_current_player(&mut self) -> Result<(), ApiError> {
-        self.core.undo_to_current_player().map_err(ApiError::from)
+        self.core.undo_to_current_player().map_err(ApiError::from)?;
+        self.step_stats.truncate(self.core.history.records().len());
+        Ok(())
+    }
+
+    pub fn capture_step_stats(&mut self, stats: crate::dto::StepStatsDto) {
+        let idx = self.core.history.records().len();
+        if self.step_stats.len() + 1 < idx {
+            self.step_stats.resize(idx - 1, None);
+        }
+        self.step_stats
+            .push(if stats.is_empty() { None } else { Some(stats) });
     }
     #[allow(dead_code)]
     pub fn legal_actions(&self) -> Vec<usize> {
@@ -179,6 +197,8 @@ impl GameSession {
             .initial()
             .map(|s| s.to_fen())
             .unwrap_or_else(|| self.core.current.to_fen());
+        let mut step_stats = self.step_stats.clone();
+        step_stats.resize(v.history.len(), None);
         ArchivedGameDetail {
             summary: crate::dto::ArchivedGameSummary {
                 game_id: game_id.to_string(),
@@ -206,6 +226,15 @@ impl GameSession {
                 })
                 .collect(),
             moves: v.history,
+            snapshots: self
+                .core
+                .history
+                .snapshots()
+                .iter()
+                .map(|s| crate::dto::hex_encode(&s.encode()))
+                .collect(),
+            final_snapshot: Some(crate::dto::hex_encode(&self.core.current.encode())),
+            step_stats,
         }
     }
 }
@@ -350,10 +379,88 @@ impl AppState {
             return;
         }
         let detail = s.archived_detail(game_id, unix_now());
+        self.persist_archive(&detail);
         let mut recent = lock(&self.recent);
         recent.push_front(detail);
-        recent.truncate(self.config.recent_games);
+
+        while recent.len() > self.config.recent_games {
+            match recent.pop_back() {
+                Some(removed) => {
+                    if let Ok(id) = Uuid::parse_str(&removed.summary.game_id) {
+                        self.remove_archive_file(id);
+                    }
+                }
+                None => break,
+            }
+        }
         tracing::info!(game = %game_id, "对局终局，已归档至最近对局记录（共 {} 条）", recent.len());
+    }
+    fn archive_file(&self, game_id: Uuid) -> Option<PathBuf> {
+        self.config
+            .archive_dir
+            .as_ref()
+            .map(|dir| dir.join(format!("{game_id}.json")))
+    }
+
+    fn persist_archive(&self, detail: &ArchivedGameDetail) {
+        let Ok(game_id) = parse_game_id(&detail.summary.game_id) else {
+            return;
+        };
+        let Some(path) = self.archive_file(game_id) else {
+            return;
+        };
+        let write = || -> std::io::Result<()> {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(
+                &path,
+                serde_json::to_string_pretty(detail).map_err(|e| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
+                })?,
+            )
+        };
+        if let Err(e) = write() {
+            tracing::warn!(archive = %detail.summary.game_id, "归档落盘失败（仅保留内存归档）: {e}");
+        }
+    }
+    fn remove_archive_file(&self, game_id: Uuid) {
+        if let Some(path) = self.archive_file(game_id) {
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => tracing::warn!(game = %game_id, "删除过期归档文件失败: {e}"),
+            }
+        }
+    }
+
+    pub fn load_archives(&self) {
+        let Some(dir) = &self.config.archive_dir else {
+            return;
+        };
+        if self.config.recent_games == 0 {
+            return;
+        }
+        let mut details: Vec<ArchivedGameDetail> = match std::fs::read_dir(dir) {
+            Ok(entries) => entries
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+                .filter_map(|e| std::fs::read_to_string(e.path()).ok())
+                .filter_map(|text| serde_json::from_str(&text).ok())
+                .collect(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(e) => {
+                tracing::warn!("读取归档目录 {dir:?} 失败: {e}");
+                return;
+            }
+        };
+        details.sort_by(|a, b| b.summary.finished_at.cmp(&a.summary.finished_at));
+        details.truncate(self.config.recent_games);
+        let count = details.len();
+        *(lock(&self.recent)) = details.into();
+        if count > 0 {
+            tracing::info!("已从 {dir:?} 加载 {count} 条历史归档");
+        }
     }
     pub fn params(&self) -> EngineParams {
         *read_lock(&self.params)
@@ -652,5 +759,38 @@ mod tests {
             GameSession::new(Variant::DarkChess4x8, Slots::all_human()),
         );
         assert_eq!(read_lock(&games).len(), 1);
+    }
+    #[test]
+    fn archive_roundtrip_via_disk_and_capacity_cleanup() {
+        let dir = std::env::temp_dir().join(format!("banqi-arch-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mk_cfg = || ServerConfig {
+            models_dir: std::env::temp_dir().join("banqi-server-test-no-models"),
+            archive_dir: Some(dir.clone()),
+            recent_games: 2,
+            ..Default::default()
+        };
+        let app = AppState::new(mk_cfg());
+        let s = GameSession::new(Variant::DarkChess4x8, Slots::all_human());
+        let details: Vec<ArchivedGameDetail> = (0..3)
+            .map(|i| {
+                let d = s.archived_detail(Uuid::new_v4(), 1_000 + i);
+                app.persist_archive(&d);
+                d
+            })
+            .collect();
+
+        app.load_archives();
+        let recent = crate::app::sync::lock(&app.recent);
+        assert_eq!(recent.len(), 2, "应按 recent_games 截断");
+        assert_eq!(recent[0].summary.game_id, details[2].summary.game_id);
+        assert_eq!(recent[0].snapshots.len(), details[2].snapshots.len());
+        assert_eq!(recent[0].final_snapshot, details[2].final_snapshot);
+        drop(recent);
+
+        let oldest: Uuid = details[0].summary.game_id.parse().expect("uuid");
+        app.remove_archive_file(oldest);
+        assert!(!dir.join(format!("{oldest}.json")).exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

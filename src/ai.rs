@@ -107,12 +107,17 @@ fn apply_strategy_action(
     let view = s.action_view(action);
     let player = s.core.current.current_player;
     let outcome = s.apply_action(action)?;
-    if outcome.is_over() {
-        app.archive_session(game_id, s);
-    }
     s.mcts_tree = mcts_tree;
     s.expectimax_tree = ex_tree;
     let mcts_stats = MctsStatsDto::from_session(s.mcts_tree.as_ref());
+
+    s.capture_step_stats(crate::dto::StepStatsDto {
+        mcts: mcts_stats.clone(),
+        nnue: nnue_stats.clone(),
+    });
+    if outcome.is_over() {
+        app.archive_session(game_id, s);
+    }
     tracing::debug!(game = %game_id, "策略落子: action={action}，终局={}", outcome.is_over());
     Ok(Some((
         s.view(game_id),

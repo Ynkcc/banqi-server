@@ -149,7 +149,7 @@ pub struct ActionView {
     pub to: usize,
     pub is_chance: bool,
 }
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SlotView {
     pub kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -187,7 +187,7 @@ impl SlotView {
         }
     }
 }
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SlotsView {
     pub red: SlotView,
     pub black: SlotView,
@@ -231,7 +231,7 @@ pub struct GameStateResp {
     pub can_run: bool,
     pub can_undo: bool,
 }
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistoryMoveView {
     pub ply: usize,
     pub player: String,
@@ -251,7 +251,7 @@ pub struct AppliedAction {
     pub player: String,
     pub action: ActionView,
 }
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MctsStatsDto {
     pub reused: bool,
     pub budget: usize,
@@ -273,7 +273,7 @@ impl MctsStatsDto {
         })
     }
 }
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NnueStatsDto {
     pub engine: String,
     pub mode: String,
@@ -333,7 +333,7 @@ pub struct GameSummary {
 pub struct GameListResp {
     pub games: Vec<GameSummary>,
 }
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArchivedGameSummary {
     pub game_id: String,
     pub variant: String,
@@ -347,14 +347,83 @@ pub struct ArchivedGameSummary {
     pub over_reason: Option<String>,
     pub slots: SlotsView,
 }
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReplayActionDto {
     pub action: usize,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub revealed: Option<char>,
 }
-#[derive(Debug, Clone, Serialize)]
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct StepStatsDto {
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub mcts: Option<MctsStatsDto>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub nnue: Option<NnueStatsDto>,
+}
+impl StepStatsDto {
+    pub fn is_empty(&self) -> bool {
+        self.mcts.is_none() && self.nnue.is_none()
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+pub struct HiddenBagDto {
+    pub red: [u8; 7],
+    pub black: [u8; 7],
+}
+
+#[derive(Debug, Serialize)]
+pub struct ReplayStepDto {
+    pub ply: usize,
+    pub player: String,
+    pub action: usize,
+    pub from: usize,
+    pub to: usize,
+
+    pub kind: String,
+    pub is_chance: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revealed: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub captured: Option<String>,
+    pub move_counter: u32,
+
+    pub scores: [i32; 2],
+
+    pub board: Vec<String>,
+
+    pub revealed_at: Vec<bool>,
+    pub hidden_bag: HiddenBagDto,
+
+    pub board_source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stats: Option<StepStatsDto>,
+}
+#[derive(Debug, Serialize)]
+pub struct ReplayResp {
+    pub game_id: String,
+    pub variant: String,
+
+    pub termination: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub winner: Option<String>,
+
+    pub side_red: String,
+    pub side_black: String,
+    pub initial_fen: String,
+    pub initial_board: Vec<String>,
+    pub initial_shown: Vec<bool>,
+    pub final_board: Vec<String>,
+    pub final_shown: Vec<bool>,
+
+    pub final_scores: [i32; 2],
+
+    pub board_source: String,
+    pub moves: Vec<ReplayStepDto>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArchivedGameDetail {
     #[serde(flatten)]
     pub summary: ArchivedGameSummary,
@@ -362,6 +431,15 @@ pub struct ArchivedGameDetail {
     pub final_fen: String,
     pub actions: Vec<ReplayActionDto>,
     pub moves: Vec<HistoryMoveView>,
+
+    #[serde(default)]
+    pub snapshots: Vec<String>,
+
+    #[serde(default)]
+    pub final_snapshot: Option<String>,
+
+    #[serde(default)]
+    pub step_stats: Vec<Option<StepStatsDto>>,
 }
 #[derive(Debug, Serialize)]
 pub struct RecentGamesResp {
@@ -371,21 +449,6 @@ pub struct RecentGamesResp {
 pub struct RecentGamesQuery {
     #[serde(default)]
     pub limit: Option<usize>,
-}
-#[derive(Debug, Serialize)]
-pub struct ReplayPly {
-    pub ply: usize,
-    pub player: String,
-    pub fen: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_action: Option<usize>,
-}
-#[derive(Debug, Serialize)]
-pub struct ReplayResp {
-    pub game_id: String,
-    pub variant: String,
-    pub initial_fen: String,
-    pub plies: Vec<ReplayPly>,
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -514,4 +577,58 @@ pub fn winner_code(w: Option<&str>) -> Option<i32> {
         Some("draw") => Some(0),
         _ => None,
     }
+}
+
+pub fn hex_encode(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
+pub fn hex_decode(s: &str) -> Option<Vec<u8>> {
+    if s.len() % 2 != 0 {
+        return None;
+    }
+    (0..s.len() / 2)
+        .map(|i| u8::from_str_radix(s.get(i * 2..i * 2 + 2)?, 16).ok())
+        .collect()
+}
+
+pub fn termination_label(reason: Option<&str>) -> String {
+    match reason {
+        Some("checkmate") => "decisive",
+        Some("draw") => "quiet_draw",
+        Some("max_steps") => "max_steps",
+        _ => "unspecified",
+    }
+    .to_string()
+}
+
+pub fn describe_side(slot: &SlotView) -> String {
+    match slot.kind.as_str() {
+        "Human" => "人类玩家".to_string(),
+        "Agent" => {
+            let id = slot.agent_id.as_deref().unwrap_or("?");
+            let short: String = id.chars().take(8).collect();
+            match &slot.model_file {
+                Some(m) => format!("Agent({short}) · {}", model_short(m)),
+                None => format!("Agent({short})"),
+            }
+        }
+
+        k if slot.model_file.is_none() => format!("规则策略（{k}）"),
+        k => format!(
+            "{k} · {}",
+            model_short(slot.model_file.as_deref().unwrap_or(""))
+        ),
+    }
+}
+fn model_short(file: &str) -> String {
+    std::path::Path::new(file)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(file)
+        .to_string()
 }

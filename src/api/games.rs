@@ -382,26 +382,9 @@ pub async fn replay_recent_game(
     Path(id): Path<String>,
 ) -> Result<Json<ReplayResp>, ApiError> {
     let detail = find_archived(&app, &id)?;
-    let initial = PositionSnapshot::from_fen(detail.initial_fen.trim())
-        .map_err(|e| ApiError::Internal(format!("归档初始局面解析失败: {e}")))?;
-    let moves: Vec<(usize, Option<banqi_core::core::env::Piece>)> = detail
-        .actions
-        .iter()
-        .map(|m| {
-            (
-                m.action,
-                m.revealed.and_then(banqi_core::core::env::letter_piece),
-            )
-        })
-        .collect();
-    let plies = crate::app::envops::replay_plies(initial.variant, &initial, &moves)
-        .map_err(ApiError::Internal)?;
-    Ok(Json(ReplayResp {
-        game_id: detail.summary.game_id,
-        variant: initial.variant.as_str().to_string(),
-        initial_fen: detail.initial_fen,
-        plies,
-    }))
+    let resp =
+        crate::app::replay::build_replay(&detail).map_err(ApiError::Internal)?;
+    Ok(Json(resp))
 }
 
 pub async fn replay_as_new_game(

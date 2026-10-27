@@ -2,6 +2,7 @@ pub mod common;
 pub mod envops;
 pub mod expectimax_view;
 pub mod mcts_view;
+pub mod replay;
 pub mod models;
 pub mod player;
 pub mod search;

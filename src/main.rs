@@ -27,6 +27,7 @@ async fn main() {
     };
     let addr = config.addr.clone();
     let app_state = Arc::new(AppState::new(config));
+    app_state.load_archives();
     let files = app_state.models.files();
     tracing::info!(
         "模型目录扫描完成: {} 个模型文件（随用随加载：对局绑定的文件首次使用时才加载；会话池 {}，device {}）",
