@@ -12,6 +12,8 @@ pub struct ServerConfig {
     pub nn_cache_entries: usize,
     pub default_engine_budget: u64,
     pub default_nnue: SearchBudget,
+
+    pub recent_games: usize,
 }
 impl Default for ServerConfig {
     fn default() -> Self {
@@ -25,6 +27,7 @@ impl Default for ServerConfig {
             nn_cache_entries: 200_000,
             default_engine_budget: 300_000,
             default_nnue: SearchBudget::default(),
+            recent_games: 20,
         }
     }
 }
@@ -93,6 +96,11 @@ impl ServerConfig {
                         format!("--search-timeout 需要正整数（毫秒），得到: {value}")
                     })?
                 }
+                "--recent-games" => {
+                    self.recent_games = value.parse().map_err(|_| {
+                        format!("--recent-games 需要非负整数（0 = 关闭归档），得到: {value}")
+                    })?
+                }
                 "--default-variant" => {
                     self.default_variant = Some(parse_variant(&value).ok_or_else(|| {
                         format!(
@@ -149,6 +157,7 @@ impl ServerConfig {
          \x20   --nnue-time <MS>            NNUE 对手默认时间预算（time 模式，默认 5000 毫秒）\n\
          \x20   --search-timeout <MS>       搜索硬超时（全模式必选生效，默认 60000 毫秒；\n\
          \x20                               超时放弃后续搜索返回实际结果）\n\
+         \x20   --recent-games <N>          最近对局归档条数上限（默认 20，0 = 关闭）\n\
          \x20   --default-variant <ID>      默认对局变体（缺省时取首个有模型者，\n\
          \x20                               再退回首个变体）"
             .to_string()

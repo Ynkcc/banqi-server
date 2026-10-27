@@ -1,10 +1,11 @@
 use crate::ai;
 use crate::api::parse_variant_or_err;
 use crate::app::player::{PlayerSlot, StrategyKind};
-use crate::app::sync::{read_lock, write_lock};
+use crate::app::sync::{lock, read_lock, write_lock};
 use crate::dto::{
-    AppliedAction, CreateGameReq, DryRunReq, GameCreatedResp, GameListResp, GameStateResp,
-    MoveActionResp, MoveReq, MoveResp, PutSlotsReq, SlotReq, SlotsReq, SuggestionResp, UndoReq,
+    AppliedAction, ArchivedGameDetail, CreateGameReq, DryRunReq, GameCreatedResp, GameListResp,
+    GameStateResp, MoveActionResp, MoveReq, MoveResp, PutSlotsReq, RecentGamesQuery,
+    RecentGamesResp, ReplayGameReq, ReplayResp, SlotReq, SlotsReq, SuggestionResp, UndoReq,
 };
 use crate::error::ApiError;
 use crate::state::{GameSession, SharedState, get_mut_session, get_session, parse_game_id};
@@ -108,6 +109,8 @@ pub async fn create_game(
         None => GameSession::new_with_scenario(variant, req.scenario.as_ref(), slots)?,
     };
     let state = session.view(game_id);
+
+    app.archive_session(game_id, &session);
     app.games
         .write()
         .unwrap_or_else(|e| e.into_inner())
@@ -165,6 +168,9 @@ pub async fn move_piece(
         let s = get_mut_session(&mut games, &id, game_id)?;
         let mover = s.core.current.current_player;
         let outcome = s.apply_action(req.action)?;
+        if outcome.is_over() {
+            app.archive_session(game_id, s);
+        }
         let human_view = s.action_view(req.action);
         tracing::info!(
             game = %game_id,
@@ -339,4 +345,90 @@ pub async fn undo(
         }
     }
     Ok(Json(MoveResp::new(s.view(game_id), Vec::new(), None, None)))
+}
+
+fn find_archived(app: &SharedState, id: &str) -> Result<ArchivedGameDetail, ApiError> {
+    lock(&app.recent)
+        .iter()
+        .find(|g| g.summary.game_id == id)
+        .cloned()
+        .ok_or_else(|| ApiError::GameNotFound(format!("最近对局归档 {id}")))
+}
+
+pub async fn list_recent_games(
+    State(app): State<SharedState>,
+    axum::extract::Query(q): axum::extract::Query<RecentGamesQuery>,
+) -> Json<RecentGamesResp> {
+    let recent = lock(&app.recent);
+    let limit = q.limit.unwrap_or(recent.len()).min(recent.len());
+    Json(RecentGamesResp {
+        games: recent
+            .iter()
+            .take(limit)
+            .map(|g| g.summary.clone())
+            .collect(),
+    })
+}
+
+pub async fn get_recent_game(
+    State(app): State<SharedState>,
+    Path(id): Path<String>,
+) -> Result<Json<ArchivedGameDetail>, ApiError> {
+    Ok(Json(find_archived(&app, &id)?))
+}
+
+pub async fn replay_recent_game(
+    State(app): State<SharedState>,
+    Path(id): Path<String>,
+) -> Result<Json<ReplayResp>, ApiError> {
+    let detail = find_archived(&app, &id)?;
+    let initial = PositionSnapshot::from_fen(detail.initial_fen.trim())
+        .map_err(|e| ApiError::Internal(format!("归档初始局面解析失败: {e}")))?;
+    let moves: Vec<(usize, Option<banqi_core::core::env::Piece>)> = detail
+        .actions
+        .iter()
+        .map(|m| {
+            (
+                m.action,
+                m.revealed.and_then(banqi_core::core::env::letter_piece),
+            )
+        })
+        .collect();
+    let plies = crate::app::envops::replay_plies(initial.variant, &initial, &moves)
+        .map_err(ApiError::Internal)?;
+    Ok(Json(ReplayResp {
+        game_id: detail.summary.game_id,
+        variant: initial.variant.as_str().to_string(),
+        initial_fen: detail.initial_fen,
+        plies,
+    }))
+}
+
+pub async fn replay_as_new_game(
+    State(app): State<SharedState>,
+    Path(id): Path<String>,
+    req: Option<Json<ReplayGameReq>>,
+) -> Result<Json<GameCreatedResp>, ApiError> {
+    let detail = find_archived(&app, &id)?;
+    let snap = PositionSnapshot::from_fen(detail.initial_fen.trim())
+        .map_err(|e| ApiError::Internal(format!("归档初始局面解析失败: {e}")))?;
+    let variant = snap.variant;
+    let slots = build_slots(&app, req.and_then(|Json(r)| r.slots).as_ref(), variant).await?;
+    let new_id = Uuid::new_v4();
+    let session = GameSession::from_snapshot(variant, snap, slots);
+    let state = session.view(new_id);
+    app.games
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(new_id, session);
+    tracing::info!(
+        archive = %id,
+        game = %new_id,
+        "从最近对局归档复演建局: variant={}",
+        variant.as_str()
+    );
+    Ok(Json(GameCreatedResp {
+        game_id: new_id.to_string(),
+        state,
+    }))
 }

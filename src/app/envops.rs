@@ -74,3 +74,80 @@ pub fn coords_for_action(variant: Variant, action: usize) -> Option<Vec<usize>> 
         .get(action)
         .cloned()
 }
+
+pub fn replay_plies(
+    variant: Variant,
+    initial: &PositionSnapshot,
+    moves: &[(usize, Option<banqi_core::core::env::Piece>)],
+) -> Result<Vec<crate::dto::ReplayPly>, String> {
+    use crate::app::common::player_label;
+    let mut snap = initial.clone();
+    let mut plies = vec![crate::dto::ReplayPly {
+        ply: 0,
+        player: player_label(snap.current_player),
+        fen: snap.to_fen(),
+        last_action: None,
+    }];
+    for (i, &(action, reveal)) in moves.iter().enumerate() {
+        snap = crate::with_env!(variant, &snap, env => {
+            env.step_with_reveal(action, reveal)
+                .map(|_| env.to_snapshot())
+        })
+        .and_then(std::convert::identity)
+        .map_err(|e| format!("第 {} 步（action={action}）推演失败: {e}", i + 1))?;
+        plies.push(crate::dto::ReplayPly {
+            ply: i + 1,
+            player: player_label(snap.current_player),
+            fen: snap.to_fen(),
+            last_action: Some(action),
+        });
+    }
+    Ok(plies)
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::session::SnapshotSession;
+    fn move_pairs(live: &SnapshotSession) -> Vec<(usize, Option<banqi_core::core::env::Piece>)> {
+        live.history
+            .records()
+            .iter()
+            .map(|r| (r.action, r.revealed))
+            .collect()
+    }
+    #[test]
+    fn replay_plies_roundtrip_matches_live_session() {
+        let variant = Variant::DarkChess4x8;
+        let mut live = SnapshotSession::new(variant);
+        let initial = live.current.clone();
+        for _ in 0..8 {
+            let action = *live.legal_actions().first().expect("总有合法动作");
+            live.apply_action(action).expect("走子应成功");
+        }
+        let moves = move_pairs(&live);
+        let plies = replay_plies(variant, &initial, &moves).expect("推演应成功");
+        assert_eq!(plies.len(), moves.len() + 1);
+        assert_eq!(plies[0].fen, initial.to_fen());
+        assert!(plies[0].last_action.is_none());
+        assert_eq!(plies[1].last_action, Some(moves[0].0));
+        assert_eq!(
+            plies.last().expect("非空").fen,
+            live.current.to_fen(),
+            "推演终局局面应与实况一致（含暗子袋）"
+        );
+    }
+    #[test]
+    fn replay_plies_rejects_illegal_action() {
+        let variant = Variant::DarkChess4x8;
+        let mut live = SnapshotSession::new(variant);
+        let initial = live.current.clone();
+        let action = *live.legal_actions().first().expect("总有合法动作");
+        let illegal = (0..)
+            .find(|&a| !live.legal_actions().contains(&a))
+            .expect("动作空间大于合法集合");
+        live.apply_action(action).expect("走子应成功");
+        let moves = vec![(action, None), (illegal, None)];
+        let err = replay_plies(variant, &initial, &moves).expect_err("非法动作应报错");
+        assert!(err.contains("推演失败"));
+    }
+}

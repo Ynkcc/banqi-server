@@ -4,23 +4,32 @@ pub use crate::app::models::EngineKind;
 use crate::app::player::{Agent, EngineParams, PlayerSlot, Slots, StrategyKind};
 use crate::app::search::{BudgetMode, SearchBudget};
 use crate::app::session::SnapshotSession;
-use crate::app::sync::{read_lock, write_lock};
+use crate::app::sync::{lock, read_lock, write_lock};
 use crate::config::ServerConfig;
-use crate::dto::{ActionView, GameStateResp, HistoryMoveView, SlotView, SlotsView, winner_str};
+use crate::dto::{
+    ActionView, ArchivedGameDetail, GameStateResp, HistoryMoveView, SlotView, SlotsView, winner_str,
+};
 use crate::error::ApiError;
 use banqi_core::core::env::DarkChessEnv;
 use banqi_core::core::env::{PositionSnapshot, Variant};
 use banqi_engine::nnue::NnueEvaluator;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::Path;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use uuid::Uuid;
 pub type Models = crate::app::models::ModelPool;
+pub fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
 pub struct GameSession {
     pub core: SnapshotSession,
     pub slots: Slots,
     pub mcts_tree: Option<crate::mcts::MctsTreeBox>,
     pub expectimax_tree: Option<crate::app::expectimax_view::ExpectimaxTree>,
+    pub created_at: u64,
 }
 impl GameSession {
     #[allow(dead_code)]
@@ -30,6 +39,7 @@ impl GameSession {
             slots,
             mcts_tree: None,
             expectimax_tree: None,
+            created_at: unix_now(),
         }
     }
     pub fn new_with_scenario(
@@ -43,6 +53,7 @@ impl GameSession {
             slots,
             mcts_tree: None,
             expectimax_tree: None,
+            created_at: unix_now(),
         })
     }
     pub fn from_snapshot(variant: Variant, snapshot: PositionSnapshot, slots: Slots) -> Self {
@@ -51,6 +62,7 @@ impl GameSession {
             slots,
             mcts_tree: None,
             expectimax_tree: None,
+            created_at: unix_now(),
         }
     }
     pub fn over_state(&self) -> (bool, bool, Option<i32>) {
@@ -158,6 +170,44 @@ impl GameSession {
             slots: v.slots,
         }
     }
+
+    pub fn archived_detail(&self, game_id: Uuid, finished_at: u64) -> ArchivedGameDetail {
+        let v = self.view(game_id);
+        let initial_fen = self
+            .core
+            .history
+            .initial()
+            .map(|s| s.to_fen())
+            .unwrap_or_else(|| self.core.current.to_fen());
+        ArchivedGameDetail {
+            summary: crate::dto::ArchivedGameSummary {
+                game_id: game_id.to_string(),
+                variant: self.core.variant.as_str().to_string(),
+                created_at: self.created_at,
+                finished_at,
+                total_steps: v.game.total_step_counter as usize,
+                over: v.over,
+                winner: v.winner.clone(),
+                over_reason: v.over_reason.clone(),
+                slots: v.slots,
+            },
+            initial_fen,
+            final_fen: v.game.fen.clone(),
+            actions: self
+                .core
+                .history
+                .records()
+                .iter()
+                .map(|r| crate::dto::ReplayActionDto {
+                    action: r.action,
+                    revealed: r
+                        .revealed
+                        .map(|p| banqi_core::core::env::piece_letter(p.piece_type, p.player)),
+                })
+                .collect(),
+            moves: v.history,
+        }
+    }
 }
 pub fn strategy_slot_view(
     kind: StrategyKind,
@@ -210,6 +260,8 @@ pub struct AppState {
     pub models: Models,
     pub games: RwLock<HashMap<Uuid, GameSession>>,
     pub agents: RwLock<HashMap<Uuid, Agent>>,
+
+    pub recent: Mutex<VecDeque<ArchivedGameDetail>>,
 }
 pub type SharedState = std::sync::Arc<AppState>;
 pub fn parse_id<T: std::str::FromStr>(raw: &str, label: &str) -> Result<T, ApiError> {
@@ -285,7 +337,23 @@ impl AppState {
             models,
             games: RwLock::new(HashMap::new()),
             agents: RwLock::new(HashMap::new()),
+            recent: Mutex::new(VecDeque::new()),
         }
+    }
+
+    pub fn archive_session(&self, game_id: Uuid, s: &GameSession) {
+        if self.config.recent_games == 0 {
+            return;
+        }
+        let (terminated, truncated, _) = s.over_state();
+        if !terminated && !truncated {
+            return;
+        }
+        let detail = s.archived_detail(game_id, unix_now());
+        let mut recent = lock(&self.recent);
+        recent.push_front(detail);
+        recent.truncate(self.config.recent_games);
+        tracing::info!(game = %game_id, "对局终局，已归档至最近对局记录（共 {} 条）", recent.len());
     }
     pub fn params(&self) -> EngineParams {
         *read_lock(&self.params)

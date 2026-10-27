@@ -149,7 +149,7 @@ pub struct ActionView {
     pub to: usize,
     pub is_chance: bool,
 }
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct SlotView {
     pub kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -187,7 +187,7 @@ impl SlotView {
         }
     }
 }
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct SlotsView {
     pub red: SlotView,
     pub black: SlotView,
@@ -231,7 +231,7 @@ pub struct GameStateResp {
     pub can_run: bool,
     pub can_undo: bool,
 }
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct HistoryMoveView {
     pub ply: usize,
     pub player: String,
@@ -332,6 +332,66 @@ pub struct GameSummary {
 #[derive(Debug, Serialize)]
 pub struct GameListResp {
     pub games: Vec<GameSummary>,
+}
+#[derive(Debug, Clone, Serialize)]
+pub struct ArchivedGameSummary {
+    pub game_id: String,
+    pub variant: String,
+    pub created_at: u64,
+    pub finished_at: u64,
+    pub total_steps: usize,
+    pub over: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub winner: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub over_reason: Option<String>,
+    pub slots: SlotsView,
+}
+#[derive(Debug, Clone, Serialize)]
+pub struct ReplayActionDto {
+    pub action: usize,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revealed: Option<char>,
+}
+#[derive(Debug, Clone, Serialize)]
+pub struct ArchivedGameDetail {
+    #[serde(flatten)]
+    pub summary: ArchivedGameSummary,
+    pub initial_fen: String,
+    pub final_fen: String,
+    pub actions: Vec<ReplayActionDto>,
+    pub moves: Vec<HistoryMoveView>,
+}
+#[derive(Debug, Serialize)]
+pub struct RecentGamesResp {
+    pub games: Vec<ArchivedGameSummary>,
+}
+#[derive(Debug, Deserialize)]
+pub struct RecentGamesQuery {
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+#[derive(Debug, Serialize)]
+pub struct ReplayPly {
+    pub ply: usize,
+    pub player: String,
+    pub fen: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_action: Option<usize>,
+}
+#[derive(Debug, Serialize)]
+pub struct ReplayResp {
+    pub game_id: String,
+    pub variant: String,
+    pub initial_fen: String,
+    pub plies: Vec<ReplayPly>,
+}
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplayGameReq {
+    #[serde(default)]
+    pub slots: Option<SlotsReq>,
 }
 #[derive(Debug, Serialize)]
 pub struct GameCreatedResp {

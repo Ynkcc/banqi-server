@@ -36,6 +36,12 @@ pub fn router(state: SharedState) -> Router {
             "/api/games/{id}",
             get(games::get_game).delete(games::delete_game),
         )
+        .route("/api/games/recent", get(games::list_recent_games))
+        .route("/api/games/recent/{id}", get(games::get_recent_game))
+        .route(
+            "/api/games/recent/{id}/replay",
+            get(games::replay_recent_game).post(games::replay_as_new_game),
+        )
         .route("/api/games/{id}/move", post(games::move_piece))
         .route("/api/games/{id}/run", post(games::run))
         .route("/api/games/{id}/dry-run", post(games::dry_run))
