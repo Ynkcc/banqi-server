@@ -172,11 +172,19 @@ async fn put_settings(
         req.nnue_time_ms,
         req.search_timeout_ms,
     )?;
-    let p = app.update_params(req.mcts_sims, req.engine_budget, Some(nnue_budget));
+    let engine_budget = app.build_engine_budget(
+        req.engine_budget_mode.as_deref(),
+        req.engine_budget,
+        req.engine_depth,
+        req.engine_time_ms,
+        req.search_timeout_ms,
+    )?;
+    let p = app.update_params(req.mcts_sims, Some(engine_budget), Some(nnue_budget));
     tracing::info!(
-        "运行时调整默认引擎参数: mcts_sims={}, engine_budget={}, nnue_mode={}, nnue_depth={}, nnue_budget={}, nnue_time_ms={}, search_timeout_ms={}",
+        "运行时调整默认引擎参数: mcts_sims={}, engine_budget={}（mode={}）, nnue_mode={}, nnue_depth={}, nnue_budget={}, nnue_time_ms={}, search_timeout_ms={}",
         p.mcts_sims,
-        p.engine_budget,
+        p.engine_budget.nodes,
+        p.engine_budget.mode.as_str(),
         p.nnue_budget.mode.as_str(),
         p.nnue_budget.depth,
         p.nnue_budget.nodes,

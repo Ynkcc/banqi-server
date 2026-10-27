@@ -35,11 +35,12 @@ pub async fn engine_move(
         .unwrap_or(false);
 
     let (kind, slot) = if rule_engine {
-        let budget = app.build_search_budget(
-            req.nnue_budget_mode.as_deref(),
-            req.nnue_budget,
-            req.nnue_depth,
-            req.nnue_time_ms,
+        let budget = crate::state::AppState::build_budget(
+            app.params().engine_budget,
+            req.engine_budget_mode.as_deref(),
+            req.engine_budget,
+            req.engine_depth,
+            req.engine_time_ms,
             req.search_timeout_ms,
         )?;
         (
@@ -48,8 +49,7 @@ pub async fn engine_move(
                 StrategyKind::Expectimax,
                 None,
                 EngineParams {
-                    engine_budget: budget.nodes,
-                    nnue_budget: budget,
+                    engine_budget: budget,
                     ..app.params()
                 },
             ),

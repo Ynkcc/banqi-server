@@ -230,51 +230,77 @@ pub async fn manual_expectimax_search(
     game_id: Uuid,
     id: &str,
 ) -> Result<ExRootInfo, ApiError> {
-    let (variant, snap, budget, model_file, version) = {
+    enum EvalSel {
+        Rule,
+
+        Nnue(String),
+    }
+    let (variant, snap, budget, eval_sel, version) = {
         let games = read_lock(&app.games);
         let s = get_session(&games, id, game_id)?;
-        let budget = match s.slots.side(s.core.current.current_player) {
+        let side = s.slots.side(s.core.current.current_player);
+        let (budget, eval_sel) = match side {
             PlayerSlot::Strategy {
-                kind: StrategyKind::ExpectimaxNnue,
+                kind: StrategyKind::Expectimax,
                 params,
                 ..
-            } => params.nnue_budget,
-            _ => app.default_nnue_budget(),
-        };
-        let model_file = match s.slots.side(s.core.current.current_player) {
+            } => (params.engine_budget, EvalSel::Rule),
             PlayerSlot::Strategy {
-                model_file: Some(f),
+                kind: StrategyKind::ExpectimaxNnue,
+                model_file,
+                params,
                 ..
-            } => f.clone(),
-            _ => app.resolve_model_file(None, s.core.variant)?,
+            } => {
+                let f = match model_file.clone() {
+                    Some(f) => f,
+                    None => app.resolve_model_file(None, s.core.variant)?,
+                };
+                (params.nnue_budget, EvalSel::Nnue(f))
+            }
+            _ => (
+                app.default_nnue_budget(),
+                EvalSel::Nnue(app.resolve_model_file(None, s.core.variant)?),
+            ),
         };
         (
             s.core.variant,
             s.core.current.clone(),
             budget,
-            model_file,
+            eval_sel,
             s.core.version,
         )
     };
-    if !model_file.ends_with(".nnue") {
-        return Err(ApiError::BadRequest(
-            "Expectimax 手动搜索需要 .nnue 叶评估模型（.onnx / .pt 为 MCTS 策略模型，走 /mcts/search）"
-                .into(),
-        ));
-    }
-    let evaluator = app
-        .acquire_nnue_validated(model_file, variant)
+    let search = |evaluator, budget, label| async move {
+        tokio::task::spawn_blocking(move || {
+            use banqi_core::core::env::SnapshotEnv;
+            let env =
+                DarkChessEnv::from_snapshot(&snap).map_err(|e| format!("重建环境失败: {e}"))?;
+            crate::app::search::expectimax_search_tree(&env, evaluator, budget, label)
+        })
         .await
-        .map_err(ApiError::ModelUnavailable)?;
-    let kept = tokio::task::spawn_blocking(move || {
-        use banqi_core::core::env::SnapshotEnv;
-        let env = DarkChessEnv::from_snapshot(&snap).map_err(|e| format!("重建环境失败: {e}"))?;
-        crate::app::search::nnue_search_tree(&env, evaluator, budget)
-    })
-    .await
-    .map_err(|e| ApiError::Internal(format!("blocking 任务 join 失败: {e}")))?
-    .map_err(ApiError::Internal)?
-    .1;
+        .map_err(|e| ApiError::Internal(format!("blocking 任务 join 失败: {e}")))?
+        .map_err(ApiError::Internal)
+    };
+    let kept = match eval_sel {
+        EvalSel::Rule => {
+            let evaluator =
+                Arc::new(banqi_core::core::expectimax::rule_eval::RuleMaterialEval::default());
+            search(evaluator, budget, "rule").await?.1
+        }
+        EvalSel::Nnue(model_file) => {
+            if !model_file.ends_with(".nnue") {
+                return Err(ApiError::BadRequest(
+                    "Expectimax 手动搜索需要 .nnue 叶评估模型（.onnx / .pt 为 MCTS 策略模型，走 /mcts/search）"
+                        .into(),
+                ));
+            }
+            let evaluator = app
+                .acquire_nnue_validated(model_file, variant)
+                .await
+                .map_err(ApiError::ModelUnavailable)?;
+            search(evaluator, budget, "nnue").await?.1
+        }
+    };
     let info = ex_root_info(&kept).ok_or_else(|| ApiError::Internal("搜索未产生轨迹树".into()))?;
     let mut games = write_lock(&app.games);
     store_manual_search_trees(&mut games, game_id, version, None, Some(kept));

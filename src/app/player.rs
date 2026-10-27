@@ -1,9 +1,8 @@
 use crate::app::mcts_view::{MctsTree, MctsTreeBox};
 use crate::app::models::{EngineKind, ModelPool};
-use crate::app::search::SearchBudget;
+use crate::app::search::{BudgetMode, SearchBudget};
 use crate::dto::{MctsStatsDto, NnueStatsDto};
 use banqi_core::core::env::{DarkChessEnv, PositionSnapshot, SnapshotEnv};
-use banqi_core::core::expectimax;
 use banqi_core::core::expectimax::rule_eval::RuleMaterialEval;
 use banqi_engine::engine::{CaptureFirstPolicy, Policy, RandomPolicy, RevealFirstPolicy};
 use std::sync::Arc;
@@ -95,20 +94,21 @@ impl StrategyKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EngineParams {
     pub mcts_sims: usize,
-    pub engine_budget: u64,
+
+    pub engine_budget: SearchBudget,
     pub nnue_budget: SearchBudget,
 }
 impl EngineParams {
     pub fn clamped(mut self) -> Self {
         self.mcts_sims = self.mcts_sims.max(1);
-        self.engine_budget = self.engine_budget.max(1);
+        self.engine_budget = self.engine_budget.clamped();
         self.nnue_budget = self.nnue_budget.clamped();
         self
     }
     pub fn updated(
         self,
         mcts_sims: Option<usize>,
-        engine_budget: Option<u64>,
+        engine_budget: Option<SearchBudget>,
         nnue_budget: Option<SearchBudget>,
     ) -> Self {
         let mut p = self;
@@ -128,7 +128,11 @@ impl Default for EngineParams {
     fn default() -> Self {
         Self {
             mcts_sims: 200,
-            engine_budget: 300_000,
+            engine_budget: SearchBudget {
+                mode: crate::app::search::BudgetMode::Nodes,
+                nodes: 300_000,
+                ..SearchBudget::default()
+            },
             nnue_budget: SearchBudget::default(),
         }
     }
@@ -254,32 +258,36 @@ pub fn decide(
             Ok(Decision::plain(action))
         }
         StrategyKind::Expectimax => {
-            let budget = SearchBudget {
-                mode: crate::app::search::BudgetMode::Nodes,
-                nodes: params.engine_budget,
-                timeout_ms: params.nnue_budget.timeout_ms,
-                ..Default::default()
-            };
-            let mut cfg = budget.clamped().to_search_config();
-            cfg.nnue_evaluator = Some(Arc::new(RuleMaterialEval::default()));
-            let result = expectimax::search(&env, &cfg).ok_or("无合法动作")?;
-            let mut d = Decision::plain(result.action);
-            d.score = Some(result.value);
-            Ok(d)
-        }
-        StrategyKind::ExpectimaxNnue => {
-            let file = model_file.ok_or("ExpectimaxNnue 策略未绑定 .nnue 模型文件")?;
-            let evaluator = pool.acquire_nnue(&file)?;
-            let (action, kept) =
-                crate::app::search::nnue_search_tree(&env, evaluator, params.nnue_budget)?;
-            let stats = kept.stats.clone();
+            let evaluator = Arc::new(RuleMaterialEval::default());
+            let (action, kept) = crate::app::search::expectimax_search_tree(
+                &env,
+                evaluator,
+                params.engine_budget,
+                "rule",
+            )?;
+            let (stats, root_value) = (kept.stats.clone(), kept.root_value);
             Ok(Decision {
                 action,
                 mcts_tree: None,
                 ex_tree: Some(kept),
                 mcts_stats: None,
                 nnue_stats: Some(NnueStatsDto::from(&stats)),
-                score: None,
+                score: Some(root_value),
+            })
+        }
+        StrategyKind::ExpectimaxNnue => {
+            let file = model_file.ok_or("ExpectimaxNnue 策略未绑定 .nnue 模型文件")?;
+            let evaluator = pool.acquire_nnue(&file)?;
+            let (action, kept) =
+                crate::app::search::nnue_search_tree(&env, evaluator, params.nnue_budget)?;
+            let (stats, root_value) = (kept.stats.clone(), kept.root_value);
+            Ok(Decision {
+                action,
+                mcts_tree: None,
+                ex_tree: Some(kept),
+                mcts_stats: None,
+                nnue_stats: Some(NnueStatsDto::from(&stats)),
+                score: Some(root_value),
             })
         }
         StrategyKind::MctsOnnx => {
@@ -471,7 +479,11 @@ mod tests {
             StrategyKind::Expectimax,
             None,
             EngineParams {
-                engine_budget: 1_000,
+                engine_budget: SearchBudget {
+                    mode: BudgetMode::Nodes,
+                    nodes: 1_000,
+                    ..Default::default()
+                },
                 ..EngineParams::default()
             },
         );
@@ -480,6 +492,45 @@ mod tests {
             envops::legal_actions(&DarkChessEnv::from_snapshot(&snap).expect("重建不应失败"));
         assert!(legal.contains(&d.action));
         assert!(d.score.is_some(), "Expectimax 决策应携带根评估值");
+        assert!(d.ex_tree.is_some(), "Expectimax 决策应携带搜索树");
+        let stats = d.nnue_stats.expect("Expectimax 决策应携带搜索统计");
+        assert_eq!(stats.engine, "rule");
+        assert_eq!(stats.mode, "nodes");
+        assert_eq!(stats.budget, 1_000);
+    }
+    #[test]
+    fn expectimax_rule_stats_flow_into_archive() {
+        use crate::dto::StepStatsDto;
+        use crate::state::GameSession;
+        let slot = PlayerSlot::strategy(
+            StrategyKind::Expectimax,
+            None,
+            EngineParams {
+                engine_budget: SearchBudget {
+                    mode: BudgetMode::Nodes,
+                    nodes: 1_000,
+                    ..Default::default()
+                },
+                ..EngineParams::default()
+            },
+        );
+        let mut s = GameSession::new(Variant::DarkChess4x8, Slots::new(slot.clone(), PlayerSlot::Human));
+
+        let snap = s.core.current.clone();
+        let d = decide(&snap, &slot, None, &dummy_pool()).expect("搜索应成功");
+        s.apply_action(d.action).expect("落子应成功");
+
+        s.capture_step_stats(StepStatsDto {
+            mcts: None,
+            nnue: d.nnue_stats.clone(),
+        });
+        let detail = s.archived_detail(uuid::Uuid::new_v4(), 1_000);
+        let step = detail.step_stats[0]
+            .as_ref()
+            .and_then(|st| st.nnue.as_ref())
+            .expect("规则策略步应带搜索统计");
+        assert_eq!(step.engine, "rule");
+        assert_eq!(step.nodes, d.nnue_stats.as_ref().expect("非空").nodes);
     }
     #[test]
     fn human_slot_decision_errors() {
@@ -491,7 +542,12 @@ mod tests {
         let base = EngineParams::default();
         let p = base.updated(
             Some(0),
-            Some(0),
+            Some(SearchBudget {
+                nodes: 0,
+                depth: 0,
+                timeout_ms: 0,
+                ..Default::default()
+            }),
             Some(SearchBudget {
                 nodes: 0,
                 depth: 0,
@@ -500,12 +556,20 @@ mod tests {
             }),
         );
         assert_eq!(p.mcts_sims, 1);
-        assert_eq!(p.engine_budget, 1);
+        assert_eq!(p.engine_budget.nodes, 1);
         assert_eq!(p.nnue_budget.nodes, 1);
         assert_eq!(p.nnue_budget.depth, 1);
         assert_eq!(p.nnue_budget.timeout_ms, 1);
-        let p = base.updated(None, Some(500_000), None);
-        assert_eq!(p.engine_budget, 500_000);
+        let p = base.updated(
+            None,
+            Some(SearchBudget {
+                mode: BudgetMode::Nodes,
+                nodes: 500_000,
+                ..Default::default()
+            }),
+            None,
+        );
+        assert_eq!(p.engine_budget.nodes, 500_000);
         assert_eq!(p.mcts_sims, base.mcts_sims);
         assert_eq!(p.nnue_budget, base.nnue_budget);
     }

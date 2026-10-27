@@ -129,8 +129,12 @@ impl GameSession {
         let v = crate::app::view::game_view(&self.core);
         let s = &v.scalars;
         let over = s.terminated || s.truncated;
-        let legal_actions: Vec<ActionView> =
-            v.legal_actions.iter().cloned().map(ActionView::from).collect();
+        let legal_actions: Vec<ActionView> = v
+            .legal_actions
+            .iter()
+            .cloned()
+            .map(ActionView::from)
+            .collect();
         let history: Vec<HistoryMoveView> = v
             .history
             .iter()
@@ -234,8 +238,8 @@ pub fn strategy_slot_view(
     model_file: Option<String>,
     params: EngineParams,
 ) -> SlotView {
-    let b = &params.nnue_budget;
-    let (budget_mode, nnue_depth, nnue_budget, nnue_time_ms, search_timeout_ms) = match kind {
+    let (b, e) = (&params.nnue_budget, &params.engine_budget);
+    let (budget_mode, budget_depth, budget, budget_time_ms, search_timeout_ms) = match kind {
         StrategyKind::ExpectimaxNnue => (
             Some(b.mode.as_str().to_string()),
             (b.mode == BudgetMode::DepthNodes).then_some(b.depth),
@@ -243,7 +247,13 @@ pub fn strategy_slot_view(
             (b.mode == BudgetMode::Time).then_some(b.time_ms),
             Some(b.timeout_ms),
         ),
-        StrategyKind::Expectimax => (None, None, None, None, Some(b.timeout_ms)),
+        StrategyKind::Expectimax => (
+            Some(e.mode.as_str().to_string()),
+            (e.mode == BudgetMode::DepthNodes).then_some(e.depth),
+            (e.mode != BudgetMode::Time).then_some(e.nodes),
+            (e.mode == BudgetMode::Time).then_some(e.time_ms),
+            Some(e.timeout_ms),
+        ),
         _ => (None, None, None, None, None),
     };
     SlotView {
@@ -251,11 +261,11 @@ pub fn strategy_slot_view(
         agent_id: None,
         model_file,
         mcts_sims: kind.is_mcts().then_some(params.mcts_sims),
-        engine_budget: (kind == StrategyKind::Expectimax).then_some(params.engine_budget),
+        engine_budget: (kind == StrategyKind::Expectimax).then_some(e.nodes),
         budget_mode,
-        nnue_depth,
-        nnue_budget,
-        nnue_time_ms,
+        budget_depth,
+        budget,
+        budget_time_ms,
         search_timeout_ms,
     }
 }
@@ -348,7 +358,11 @@ impl AppState {
         );
         let params = EngineParams {
             mcts_sims: config.default_sims.max(1),
-            engine_budget: config.default_engine_budget.max(1),
+            engine_budget: crate::app::search::SearchBudget {
+                mode: crate::app::search::BudgetMode::Nodes,
+                nodes: config.default_engine_budget.max(1),
+                ..SearchBudget::default()
+            },
             nnue_budget: config.default_nnue.clamped(),
         };
         Self {
@@ -470,7 +484,41 @@ impl AppState {
         time_ms: Option<u64>,
         timeout_ms: Option<u64>,
     ) -> Result<SearchBudget, ApiError> {
-        let defaults = self.default_nnue_budget();
+        Self::build_budget(
+            self.default_nnue_budget(),
+            mode,
+            nodes,
+            depth,
+            time_ms,
+            timeout_ms,
+        )
+    }
+
+    pub fn build_engine_budget(
+        &self,
+        mode: Option<&str>,
+        nodes: Option<u64>,
+        depth: Option<i32>,
+        time_ms: Option<u64>,
+        timeout_ms: Option<u64>,
+    ) -> Result<SearchBudget, ApiError> {
+        Self::build_budget(
+            self.params().engine_budget,
+            mode,
+            nodes,
+            depth,
+            time_ms,
+            timeout_ms,
+        )
+    }
+    pub fn build_budget(
+        defaults: SearchBudget,
+        mode: Option<&str>,
+        nodes: Option<u64>,
+        depth: Option<i32>,
+        time_ms: Option<u64>,
+        timeout_ms: Option<u64>,
+    ) -> Result<SearchBudget, ApiError> {
         let mode = match mode {
             None => defaults.mode,
             Some(s) => BudgetMode::parse(s).ok_or_else(|| {
@@ -490,7 +538,7 @@ impl AppState {
     pub fn update_params(
         &self,
         mcts_sims: Option<usize>,
-        engine_budget: Option<u64>,
+        engine_budget: Option<SearchBudget>,
         nnue_budget: Option<SearchBudget>,
     ) -> EngineParams {
         let mut p = write_lock(&self.params);
@@ -545,9 +593,16 @@ impl AppState {
             p.nnue_time_ms,
             p.search_timeout_ms,
         )?;
+        let engine_budget = self.build_engine_budget(
+            p.engine_budget_mode.as_deref(),
+            p.engine_budget,
+            p.engine_depth,
+            p.engine_time_ms,
+            p.search_timeout_ms,
+        )?;
         Ok(EngineParams {
             mcts_sims: p.mcts_sims.unwrap_or(d.mcts_sims).max(1),
-            engine_budget: p.engine_budget.unwrap_or(d.engine_budget).max(1),
+            engine_budget,
             nnue_budget,
         })
     }

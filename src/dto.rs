@@ -37,6 +37,13 @@ pub struct SlotParamsReq {
     pub mcts_sims: Option<usize>,
     #[serde(default)]
     pub engine_budget: Option<u64>,
+
+    #[serde(default)]
+    pub engine_budget_mode: Option<String>,
+    #[serde(default)]
+    pub engine_depth: Option<i32>,
+    #[serde(default)]
+    pub engine_time_ms: Option<u64>,
     #[serde(default)]
     pub nnue_budget_mode: Option<String>,
     #[serde(default)]
@@ -101,6 +108,13 @@ pub struct SettingsReq {
     pub mcts_sims: Option<usize>,
     #[serde(default)]
     pub engine_budget: Option<u64>,
+
+    #[serde(default)]
+    pub engine_budget_mode: Option<String>,
+    #[serde(default)]
+    pub engine_depth: Option<i32>,
+    #[serde(default)]
+    pub engine_time_ms: Option<u64>,
     #[serde(default)]
     pub nnue_budget_mode: Option<String>,
     #[serde(default)]
@@ -132,6 +146,15 @@ pub struct EngineMoveReq {
     pub engine: Option<String>,
     #[serde(default)]
     pub mcts_sims: Option<usize>,
+
+    #[serde(default)]
+    pub engine_budget: Option<u64>,
+    #[serde(default)]
+    pub engine_budget_mode: Option<String>,
+    #[serde(default)]
+    pub engine_depth: Option<i32>,
+    #[serde(default)]
+    pub engine_time_ms: Option<u64>,
     #[serde(default)]
     pub nnue_budget_mode: Option<String>,
     #[serde(default)]
@@ -171,16 +194,18 @@ pub struct SlotView {
     pub model_file: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mcts_sims: Option<usize>,
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub engine_budget: Option<u64>,
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub budget_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub nnue_depth: Option<i32>,
+    pub budget_depth: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub nnue_budget: Option<u64>,
+    pub budget: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub nnue_time_ms: Option<u64>,
+    pub budget_time_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub search_timeout_ms: Option<u64>,
 }
@@ -193,9 +218,9 @@ impl SlotView {
             mcts_sims: None,
             engine_budget: None,
             budget_mode: None,
-            nnue_depth: None,
-            nnue_budget: None,
-            nnue_time_ms: None,
+            budget_depth: None,
+            budget: None,
+            budget_time_ms: None,
             search_timeout_ms: None,
         }
     }
@@ -304,7 +329,7 @@ pub struct NnueStatsDto {
 impl From<&crate::app::search::NnueSearchStats> for NnueStatsDto {
     fn from(s: &crate::app::search::NnueSearchStats) -> Self {
         Self {
-            engine: "nnue".to_string(),
+            engine: s.engine.to_string(),
             mode: s.mode.to_string(),
             depth: s.depth,
             budget: s.budget,
@@ -521,6 +546,9 @@ pub struct ScenariosResp {
 pub struct SettingsResp {
     pub mcts_sims: usize,
     pub engine_budget: u64,
+    pub engine_budget_mode: String,
+    pub engine_depth: i32,
+    pub engine_time_ms: u64,
     pub nnue_budget_mode: String,
     pub nnue_depth: i32,
     pub nnue_budget: u64,
@@ -531,7 +559,10 @@ impl From<crate::app::player::EngineParams> for SettingsResp {
     fn from(p: crate::app::player::EngineParams) -> Self {
         Self {
             mcts_sims: p.mcts_sims,
-            engine_budget: p.engine_budget,
+            engine_budget: p.engine_budget.nodes,
+            engine_budget_mode: p.engine_budget.mode.as_str().to_string(),
+            engine_depth: p.engine_budget.depth,
+            engine_time_ms: p.engine_budget.time_ms,
             nnue_budget_mode: p.nnue_budget.mode.as_str().to_string(),
             nnue_depth: p.nnue_budget.depth,
             nnue_budget: p.nnue_budget.nodes,

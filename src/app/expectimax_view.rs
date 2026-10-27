@@ -74,6 +74,8 @@ pub struct ExpectimaxTree {
     pub tree: ExTree,
     pub chosen_action: usize,
     pub stats: NnueSearchStats,
+
+    pub root_value: f32,
 }
 pub fn flag_label(flag: BoundFlag) -> String {
     match flag {
