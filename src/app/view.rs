@@ -1,111 +1,8 @@
 use crate::app::common::history_entries;
+pub use banqi_core::core::env::outcome::{OverReason, over_reason};
+pub use banqi_core::core::env::projection::{BoardCell, BoardProjection, CellState, project};
 use banqi_core::core::env::types::{Piece, PieceType, Player};
 use banqi_core::core::env::{DarkChessEnv, PositionSnapshot};
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CellState {
-    Empty,
-    Hidden,
-    Revealed,
-}
-#[derive(Debug, Clone, Copy)]
-pub struct BoardCell {
-    pub state: CellState,
-    pub piece: Option<Piece>,
-}
-#[derive(Debug, Clone)]
-pub struct BoardProjection {
-    pub cells: Vec<BoardCell>,
-    pub dead: [Vec<PieceType>; 2],
-    pub hidden: [Vec<Piece>; 2],
-    pub current_player: Player,
-    pub move_counter: u32,
-    pub total_step_counter: u32,
-}
-pub fn project(snap: &PositionSnapshot) -> BoardProjection {
-    use banqi_core::core::env::Slot::*;
-    let cells: Vec<BoardCell> = snap
-        .slots
-        .iter()
-        .map(|slot| match slot {
-            Empty => BoardCell {
-                state: CellState::Empty,
-                piece: None,
-            },
-            Hidden => BoardCell {
-                state: CellState::Hidden,
-                piece: None,
-            },
-            Revealed(p) => BoardCell {
-                state: CellState::Revealed,
-                piece: Some(*p),
-            },
-        })
-        .collect();
-    let types: [PieceType; 7] = [
-        PieceType::Soldier,
-        PieceType::Cannon,
-        PieceType::Horse,
-        PieceType::Chariot,
-        PieceType::Elephant,
-        PieceType::Advisor,
-        PieceType::General,
-    ];
-    let mut dead: [Vec<PieceType>; 2] = Default::default();
-    for (player_idx, out) in dead.iter_mut().enumerate() {
-        for (t, &pt) in types.iter().enumerate() {
-            for _ in 0..snap.dead_counts[player_idx][t] {
-                out.push(pt);
-            }
-        }
-    }
-    let hidden: [Vec<Piece>; 2] = [
-        snap.hidden_bag
-            .iter()
-            .filter(|p| p.player == Player::Red)
-            .copied()
-            .collect(),
-        snap.hidden_bag
-            .iter()
-            .filter(|p| p.player == Player::Black)
-            .copied()
-            .collect(),
-    ];
-    BoardProjection {
-        cells,
-        dead,
-        hidden,
-        current_player: snap.current_player,
-        move_counter: snap.move_counter,
-        total_step_counter: snap.total_step_counter,
-    }
-}
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OverReason {
-    Checkmate,
-    Draw,
-    MaxSteps,
-}
-impl OverReason {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            OverReason::Checkmate => "checkmate",
-            OverReason::Draw => "draw",
-            OverReason::MaxSteps => "max_steps",
-        }
-    }
-}
-pub fn over_reason(over: bool, truncated: bool, winner: Option<i32>) -> Option<OverReason> {
-    if !over {
-        return None;
-    }
-    if matches!(winner, Some(1) | Some(-1)) {
-        Some(OverReason::Checkmate)
-    } else if truncated {
-        Some(OverReason::MaxSteps)
-    } else {
-        Some(OverReason::Draw)
-    }
-}
 #[derive(Debug, Clone, Copy)]
 pub struct LocatedCell {
     pub index: usize,
@@ -145,6 +42,20 @@ pub struct GameView {
     pub history: Vec<crate::app::common::HistoryEntry>,
     pub undoable: bool,
 }
+
+pub fn derive_action_view(
+    variant: banqi_core::core::env::Variant,
+    action: usize,
+    is_chance: bool,
+) -> ActionView {
+    let coords = crate::app::envops::coords_for_action(variant, action).unwrap_or_default();
+    ActionView {
+        action,
+        from: coords.first().copied().unwrap_or(action),
+        to: coords.last().copied().unwrap_or(action),
+        is_chance,
+    }
+}
 pub fn game_view(core: &crate::app::session::SnapshotSession) -> GameView {
     let snap = &core.current;
     let cfg = core.variant.config();
@@ -166,16 +77,7 @@ pub fn game_view(core: &crate::app::session::SnapshotSession) -> GameView {
     let legal_actions: Vec<ActionView> = core
         .legal_actions()
         .into_iter()
-        .map(|action| ActionView {
-            action,
-            from: crate::app::envops::coords_for_action(core.variant, action)
-                .and_then(|c| c.first().copied())
-                .unwrap_or(action),
-            to: crate::app::envops::coords_for_action(core.variant, action)
-                .and_then(|c| c.last().copied())
-                .unwrap_or(action),
-            is_chance: core.is_chance_action(action),
-        })
+        .map(|action| derive_action_view(core.variant, action, core.is_chance_action(action)))
         .collect();
     let scalars = ScalarView {
         current_player: snap.current_player,

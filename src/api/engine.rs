@@ -28,34 +28,63 @@ pub async fn engine_move(
     if terminated || truncated {
         return Err(ApiError::GameOver);
     }
-    let model_file = app.resolve_model_file(req.model_file.as_deref(), variant)?;
-    let kind = StrategyKind::from_engine_kind(EngineKind::from_model_file(&model_file));
-    let slot = match kind {
-        StrategyKind::ExpectimaxNnue => {
-            let budget = app.build_search_budget(
-                req.nnue_budget_mode.as_deref(),
-                req.nnue_budget,
-                req.nnue_depth,
-                req.nnue_time_ms,
-                req.search_timeout_ms,
-            )?;
+    let rule_engine = req
+        .engine
+        .as_deref()
+        .map(|s| s.trim().eq_ignore_ascii_case("rule"))
+        .unwrap_or(false);
+
+    let (kind, slot) = if rule_engine {
+        let budget = app.build_search_budget(
+            req.nnue_budget_mode.as_deref(),
+            req.nnue_budget,
+            req.nnue_depth,
+            req.nnue_time_ms,
+            req.search_timeout_ms,
+        )?;
+        (
+            StrategyKind::Expectimax,
             PlayerSlot::strategy(
-                kind,
-                Some(model_file),
+                StrategyKind::Expectimax,
+                None,
                 EngineParams {
+                    engine_budget: budget.nodes,
                     nnue_budget: budget,
                     ..app.params()
                 },
-            )
-        }
-        _ => PlayerSlot::strategy(
-            kind,
-            Some(model_file),
-            EngineParams {
-                mcts_sims: req.mcts_sims.unwrap_or_else(|| app.default_sims()).max(1),
-                ..app.params()
-            },
-        ),
+            ),
+        )
+    } else {
+        let model_file = app.resolve_model_file(req.model_file.as_deref(), variant)?;
+        let kind = StrategyKind::from_engine_kind(EngineKind::from_model_file(&model_file));
+        let slot = match kind {
+            StrategyKind::ExpectimaxNnue => {
+                let budget = app.build_search_budget(
+                    req.nnue_budget_mode.as_deref(),
+                    req.nnue_budget,
+                    req.nnue_depth,
+                    req.nnue_time_ms,
+                    req.search_timeout_ms,
+                )?;
+                PlayerSlot::strategy(
+                    kind,
+                    Some(model_file),
+                    EngineParams {
+                        nnue_budget: budget,
+                        ..app.params()
+                    },
+                )
+            }
+            _ => PlayerSlot::strategy(
+                kind,
+                Some(model_file),
+                EngineParams {
+                    mcts_sims: req.mcts_sims.unwrap_or_else(|| app.default_sims()).max(1),
+                    ..app.params()
+                },
+            ),
+        };
+        (kind, slot)
     };
     let app2 = Arc::clone(&app);
     let decision =

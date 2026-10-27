@@ -127,6 +127,9 @@ pub struct UndoReq {
 #[serde(rename_all = "camelCase")]
 pub struct EngineMoveReq {
     pub fen: String,
+
+    #[serde(default)]
+    pub engine: Option<String>,
     #[serde(default)]
     pub mcts_sims: Option<usize>,
     #[serde(default)]
@@ -148,6 +151,16 @@ pub struct ActionView {
     pub from: usize,
     pub to: usize,
     pub is_chance: bool,
+}
+impl From<crate::app::view::ActionView> for ActionView {
+    fn from(a: crate::app::view::ActionView) -> Self {
+        Self {
+            action: a.action,
+            from: a.from,
+            to: a.to,
+            is_chance: a.is_chance,
+        }
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SlotView {
@@ -260,17 +273,21 @@ pub struct MctsStatsDto {
     pub nodes: usize,
     pub elapsed_ms: u64,
 }
+impl From<&banqi_engine::engine::MctsSearchStats> for MctsStatsDto {
+    fn from(s: &banqi_engine::engine::MctsSearchStats) -> Self {
+        Self {
+            reused: s.reused,
+            budget: s.budget,
+            actual_sims: s.actual_sims,
+            max_depth: s.max_depth,
+            nodes: s.nodes,
+            elapsed_ms: s.elapsed_ms,
+        }
+    }
+}
 impl MctsStatsDto {
     pub fn from_session(tree: Option<&crate::mcts::MctsTreeBox>) -> Option<Self> {
-        let stats = &tree?.root_info().stats;
-        Some(Self {
-            reused: stats.reused,
-            budget: stats.budget,
-            actual_sims: stats.actual_sims,
-            max_depth: stats.max_depth,
-            nodes: stats.nodes,
-            elapsed_ms: stats.elapsed_ms,
-        })
+        Some(Self::from(&tree?.root_info().stats))
     }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -283,6 +300,20 @@ pub struct NnueStatsDto {
     pub nodes: u64,
     pub reached_depth: i32,
     pub elapsed_ms: u64,
+}
+impl From<&crate::app::search::NnueSearchStats> for NnueStatsDto {
+    fn from(s: &crate::app::search::NnueSearchStats) -> Self {
+        Self {
+            engine: "nnue".to_string(),
+            mode: s.mode.to_string(),
+            depth: s.depth,
+            budget: s.budget,
+            time_limit_ms: s.time_limit_ms,
+            nodes: s.nodes,
+            reached_depth: s.reached_depth,
+            elapsed_ms: s.elapsed_ms,
+        }
+    }
 }
 #[derive(Debug, Serialize)]
 pub struct MoveResp {
@@ -420,6 +451,8 @@ pub struct ReplayResp {
 
     pub final_scores: [i32; 2],
 
+    pub final_hidden_bag: HiddenBagDto,
+
     pub board_source: String,
     pub moves: Vec<ReplayStepDto>,
 }
@@ -556,11 +589,9 @@ pub struct ModelEntryDto {
 pub struct MoveActionResp {
     pub action: Option<usize>,
 }
+
 pub fn player_str(p: banqi_core::core::env::types::Player) -> String {
-    match p {
-        banqi_core::core::env::types::Player::Red => "red".to_string(),
-        banqi_core::core::env::types::Player::Black => "black".to_string(),
-    }
+    crate::app::common::player_label(p)
 }
 pub fn winner_str(w: Option<i32>) -> Option<String> {
     match w {

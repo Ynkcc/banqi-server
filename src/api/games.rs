@@ -3,7 +3,7 @@ use crate::api::parse_variant_or_err;
 use crate::app::player::{PlayerSlot, StrategyKind};
 use crate::app::sync::{lock, read_lock, write_lock};
 use crate::dto::{
-    AppliedAction, ArchivedGameDetail, CreateGameReq, DryRunReq, GameCreatedResp, GameListResp,
+    ArchivedGameDetail, CreateGameReq, DryRunReq, GameCreatedResp, GameListResp,
     GameStateResp, MoveActionResp, MoveReq, MoveResp, PutSlotsReq, RecentGamesQuery,
     RecentGamesResp, ReplayGameReq, ReplayResp, SlotReq, SlotsReq, SuggestionResp, UndoReq,
 };
@@ -163,49 +163,7 @@ pub async fn move_piece(
     Json(req): Json<MoveReq>,
 ) -> Result<Json<MoveResp>, ApiError> {
     let game_id = parse_game_id(&id)?;
-    let (mut state, mover, human_view, strategy_version) = {
-        let mut games = write_lock(&app.games);
-        let s = get_mut_session(&mut games, &id, game_id)?;
-        let mover = s.core.current.current_player;
-        let outcome = s.apply_action(req.action)?;
-        if outcome.is_over() {
-            app.archive_session(game_id, s);
-        }
-        let human_view = s.action_view(req.action);
-        tracing::info!(
-            game = %game_id,
-            "人类走子: action={}，终局={}，winner={:?}",
-            req.action,
-            outcome.is_over(),
-            outcome.winner
-        );
-        let state = s.view(game_id);
-        let strategy_version = s.strategy_to_move().then_some(s.core.version);
-        (state, mover, human_view, strategy_version)
-    };
-    let mut actions = vec![AppliedAction {
-        player: crate::dto::player_str(mover),
-        action: human_view,
-    }];
-    let mut mcts_stats = None;
-    let mut nnue_stats = None;
-    if let Some(version) = strategy_version {
-        match ai::run_strategy_turn(&app, game_id, version, None).await? {
-            Some((new_state, strategy_action, m, n)) => {
-                actions.push(strategy_action);
-                mcts_stats = m;
-                nnue_stats = n;
-                state = new_state;
-            }
-            None => {
-                let games = read_lock(&app.games);
-                if let Some(s) = games.get(&game_id) {
-                    state = s.view(game_id);
-                }
-            }
-        }
-    }
-    Ok(Json(MoveResp::new(state, actions, mcts_stats, nnue_stats)))
+    Ok(Json(ai::human_move(&app, game_id, &id, req.action).await?))
 }
 pub async fn run(
     State(app): State<SharedState>,
@@ -302,28 +260,8 @@ pub async fn move_action(
     let game_id = parse_game_id(&id)?;
     let games = read_lock(&app.games);
     let s = get_session(&games, &id, game_id)?;
-    let total = {
-        let cfg = s.core.variant.config();
-        cfg.rows * cfg.cols
-    };
-    if q.from >= total || q.to >= total {
-        return Err(ApiError::BadRequest(format!(
-            "坐标越界: from={} to={}（变体 {} 共 {total} 格）",
-            q.from,
-            q.to,
-            s.core.variant.as_str()
-        )));
-    }
-    let action = if q.from == q.to {
-        let tables = banqi_core::core::env::actions::action_lookup_tables(&s.core.variant.config());
-        let a = tables.single_to_action[q.from];
-        (a >= 0).then_some(a as usize)
-    } else {
-        use banqi_core::core::env::SnapshotEnv;
-        let env = banqi_core::core::env::DarkChessEnv::from_snapshot(&s.core.current)
-            .map_err(|e| ApiError::Internal(format!("重建环境失败: {e}")))?;
-        env.get_action_for_coords(&[q.from, q.to])
-    };
+    let action = crate::app::envops::action_for_coords(s.core.variant, &s.core.current, q.from, q.to)
+        .map_err(ApiError::BadRequest)?;
     Ok(Json(MoveActionResp { action }))
 }
 pub async fn undo(

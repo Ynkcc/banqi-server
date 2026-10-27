@@ -85,7 +85,7 @@ pub fn build_replay(detail: &ArchivedGameDetail) -> Result<ReplayResp, String> {
 
     let (initial_board, initial_shown, _) = god_view(&per_ply(0));
     let final_snap = final_snapshot(detail, &per_ply(detail.moves.len().saturating_sub(1)));
-    let (final_board, final_shown, _) = god_view(&final_snap);
+    let (final_board, final_shown, final_hidden_bag) = god_view(&final_snap);
     let final_scores = final_snap.scores;
 
     Ok(ReplayResp {
@@ -101,6 +101,7 @@ pub fn build_replay(detail: &ArchivedGameDetail) -> Result<ReplayResp, String> {
         final_board,
         final_shown,
         final_scores,
+        final_hidden_bag,
         board_source: board_source.to_string(),
         moves,
     })

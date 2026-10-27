@@ -1,10 +1,14 @@
 use crate::app::player::{self, PlayerSlot, StrategyKind};
 use crate::app::sync::{read_lock, write_lock};
 use crate::dto::{
-    AppliedAction, DryRunReq, GameStateResp, MctsStatsDto, NnueStatsDto, SuggestionResp, player_str,
+    AppliedAction, DryRunReq, GameStateResp, MctsStatsDto, MoveResp, NnueStatsDto, SuggestionResp,
+    player_str,
 };
 use crate::error::ApiError;
-use crate::state::{AppState, SharedState, get_mut_session, get_session};
+use crate::nnue::{ExRootInfo, ex_root_info};
+use crate::state::{
+    AppState, SharedState, get_mut_session, get_session, store_manual_search_trees,
+};
 use banqi_core::core::env::types::Slot;
 use banqi_core::core::env::{DarkChessEnv, PositionSnapshot};
 use std::sync::Arc;
@@ -168,6 +172,114 @@ pub async fn run_strategy_turn(
         decision.nnue_stats,
         is_override,
     )
+}
+
+pub async fn human_move(
+    app: &SharedState,
+    game_id: Uuid,
+    id: &str,
+    action: usize,
+) -> Result<MoveResp, ApiError> {
+    let (mut state, mover, human_view, strategy_version) = {
+        let mut games = write_lock(&app.games);
+        let s = get_mut_session(&mut games, id, game_id)?;
+        let mover = s.core.current.current_player;
+        let outcome = s.apply_action(action)?;
+        if outcome.is_over() {
+            app.archive_session(game_id, s);
+        }
+        let human_view = s.action_view(action);
+        tracing::info!(
+            game = %game_id,
+            "人类走子: action={}，终局={}，winner={:?}",
+            action,
+            outcome.is_over(),
+            outcome.winner
+        );
+        let state = s.view(game_id);
+        let strategy_version = s.strategy_to_move().then_some(s.core.version);
+        (state, mover, human_view, strategy_version)
+    };
+    let mut actions = vec![AppliedAction {
+        player: player_str(mover),
+        action: human_view,
+    }];
+    let mut mcts_stats = None;
+    let mut nnue_stats = None;
+    if let Some(version) = strategy_version {
+        match run_strategy_turn(app, game_id, version, None).await? {
+            Some((new_state, strategy_action, m, n)) => {
+                actions.push(strategy_action);
+                mcts_stats = m;
+                nnue_stats = n;
+                state = new_state;
+            }
+            None => {
+                let games = read_lock(&app.games);
+                if let Some(s) = games.get(&game_id) {
+                    state = s.view(game_id);
+                }
+            }
+        }
+    }
+    Ok(MoveResp::new(state, actions, mcts_stats, nnue_stats))
+}
+
+pub async fn manual_expectimax_search(
+    app: &SharedState,
+    game_id: Uuid,
+    id: &str,
+) -> Result<ExRootInfo, ApiError> {
+    let (variant, snap, budget, model_file, version) = {
+        let games = read_lock(&app.games);
+        let s = get_session(&games, id, game_id)?;
+        let budget = match s.slots.side(s.core.current.current_player) {
+            PlayerSlot::Strategy {
+                kind: StrategyKind::ExpectimaxNnue,
+                params,
+                ..
+            } => params.nnue_budget,
+            _ => app.default_nnue_budget(),
+        };
+        let model_file = match s.slots.side(s.core.current.current_player) {
+            PlayerSlot::Strategy {
+                model_file: Some(f),
+                ..
+            } => f.clone(),
+            _ => app.resolve_model_file(None, s.core.variant)?,
+        };
+        (
+            s.core.variant,
+            s.core.current.clone(),
+            budget,
+            model_file,
+            s.core.version,
+        )
+    };
+    if !model_file.ends_with(".nnue") {
+        return Err(ApiError::BadRequest(
+            "Expectimax 手动搜索需要 .nnue 叶评估模型（.onnx / .pt 为 MCTS 策略模型，走 /mcts/search）"
+                .into(),
+        ));
+    }
+    let evaluator = app
+        .acquire_nnue_validated(model_file, variant)
+        .await
+        .map_err(ApiError::ModelUnavailable)?;
+    let kept = tokio::task::spawn_blocking(move || {
+        use banqi_core::core::env::SnapshotEnv;
+        let env = DarkChessEnv::from_snapshot(&snap).map_err(|e| format!("重建环境失败: {e}"))?;
+        crate::app::search::nnue_search_tree(&env, evaluator, budget)
+    })
+    .await
+    .map_err(|e| ApiError::Internal(format!("blocking 任务 join 失败: {e}")))?
+    .map_err(ApiError::Internal)?
+    .1;
+    let info = ex_root_info(&kept).ok_or_else(|| ApiError::Internal("搜索未产生轨迹树".into()))?;
+    let mut games = write_lock(&app.games);
+    store_manual_search_trees(&mut games, game_id, version, None, Some(kept));
+    tracing::info!(game = %game_id, "手动 Expectimax 搜索完成");
+    Ok(info)
 }
 pub async fn run_dry_run(
     app: &SharedState,

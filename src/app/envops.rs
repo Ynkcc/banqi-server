@@ -1,6 +1,6 @@
 use banqi_core::core::env::actions::action_lookup_tables;
 use banqi_core::core::env::error::EnvError;
-use banqi_core::core::env::{GameEnv, PositionSnapshot, SnapshotEnv, Variant};
+use banqi_core::core::env::{DarkChessEnv, GameEnv, PositionSnapshot, SnapshotEnv, Variant};
 #[macro_export]
 macro_rules! with_env {
     ($variant:expr, $snap:expr, $e:ident => $body:expr) => {
@@ -13,6 +13,7 @@ macro_rules! with_env {
         })
     };
 }
+pub use banqi_core::core::env::outcome::StepOutcome;
 pub fn initial_snapshot(variant: Variant) -> PositionSnapshot {
     banqi_core::for_variant_env!(variant, E => {
         <E as Default>::default().to_snapshot()
@@ -36,34 +37,10 @@ pub fn initial_snapshot_with_scenario(
     Ok(env.to_snapshot())
 }
 pub fn legal_actions<E: GameEnv>(env: &E) -> Vec<usize> {
-    let n = env.action_space_size();
-    let mut masks = vec![0i32; n];
-    env.action_masks_into(&mut masks);
-    masks
-        .iter()
-        .enumerate()
-        .filter(|(_, m)| **m != 0)
-        .map(|(a, _)| a)
-        .collect()
-}
-#[derive(Clone, Copy, Debug)]
-pub struct StepOutcome {
-    pub terminated: bool,
-    pub truncated: bool,
-    pub winner: Option<i32>,
-}
-impl StepOutcome {
-    pub fn is_over(&self) -> bool {
-        self.terminated || self.truncated
-    }
+    env.legal_actions()
 }
 pub fn step<E: GameEnv>(env: &mut E, action: usize) -> Result<StepOutcome, EnvError> {
-    let (_, terminated, truncated, winner) = env.step(action)?;
-    Ok(StepOutcome {
-        terminated,
-        truncated,
-        winner,
-    })
+    banqi_core::core::env::outcome::step(env, action)
 }
 pub fn game_over<E: GameEnv>(env: &E) -> (bool, bool, Option<i32>) {
     env.check_game_over_conditions()
@@ -73,4 +50,28 @@ pub fn coords_for_action(variant: Variant, action: usize) -> Option<Vec<usize>> 
         .action_to_coords
         .get(action)
         .cloned()
+}
+
+pub fn action_for_coords(
+    variant: Variant,
+    snap: &PositionSnapshot,
+    from: usize,
+    to: usize,
+) -> Result<Option<usize>, String> {
+    let cfg = variant.config();
+    let total = cfg.rows * cfg.cols;
+    if from >= total || to >= total {
+        return Err(format!(
+            "坐标越界: from={from} to={to}（变体 {} 共 {total} 格）",
+            variant.as_str()
+        ));
+    }
+    if from == to {
+        let tables = action_lookup_tables(&cfg);
+        let a = tables.single_to_action[from];
+        return Ok((a >= 0).then_some(a as usize));
+    }
+    use banqi_core::core::env::SnapshotEnv;
+    let env = DarkChessEnv::from_snapshot(snap).map_err(|e| format!("重建环境失败: {e}"))?;
+    Ok(env.get_action_for_coords(&[from, to]))
 }

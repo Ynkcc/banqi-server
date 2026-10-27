@@ -45,6 +45,19 @@ pub struct ExSearchStats {
     pub reached_depth: i32,
     pub elapsed_ms: u64,
 }
+impl From<&NnueSearchStats> for ExSearchStats {
+    fn from(s: &NnueSearchStats) -> Self {
+        Self {
+            mode: s.mode.to_string(),
+            depth: s.depth,
+            budget: s.budget,
+            time_limit_ms: s.time_limit_ms,
+            nodes: s.nodes,
+            reached_depth: s.reached_depth,
+            elapsed_ms: s.elapsed_ms,
+        }
+    }
+}
 #[derive(Debug, Clone, Serialize)]
 pub struct ExRootInfo {
     pub root: ExNodeSummary,
@@ -111,15 +124,7 @@ pub fn ex_root_info(t: &ExpectimaxTree) -> Option<ExRootInfo> {
     Some(ExRootInfo {
         root: node_summary(&t.tree, 0),
         chosen_action: t.chosen_action,
-        stats: ExSearchStats {
-            mode: t.stats.mode.to_string(),
-            depth: t.stats.depth,
-            budget: t.stats.budget,
-            time_limit_ms: t.stats.time_limit_ms,
-            nodes: t.stats.nodes,
-            reached_depth: t.stats.reached_depth,
-            elapsed_ms: t.stats.elapsed_ms,
-        },
+        stats: ExSearchStats::from(&t.stats),
     })
 }
 pub fn ex_edge_list(tree: &ExTree, node_id: usize) -> Vec<ExEdge> {
@@ -163,25 +168,7 @@ pub fn ex_node_board(tree: &ExTree, node_id: usize) -> Option<ExNodeBoard> {
     let state = crate::app::view::game_state_view(&snap);
     Some(ExNodeBoard { state, move_coords })
 }
-pub fn ex_tree_stats(tree: &ExTree) -> (usize, usize) {
-    let nodes = tree.nodes.len();
-    let max_depth = tree
-        .nodes
-        .iter()
-        .filter(|n| n.parent.is_some())
-        .map(|n| {
-            let mut d = 0usize;
-            let mut cur = n.parent;
-            while let Some(p) = cur {
-                d += 1;
-                cur = tree.nodes[p].parent;
-            }
-            d
-        })
-        .max()
-        .unwrap_or(0);
-    (nodes, max_depth)
-}
+pub use banqi_core::core::expectimax::ex_tree_stats;
 #[cfg(test)]
 mod tests {
     use super::*;

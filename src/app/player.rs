@@ -278,16 +278,7 @@ pub fn decide(
                 mcts_tree: None,
                 ex_tree: Some(kept),
                 mcts_stats: None,
-                nnue_stats: Some(NnueStatsDto {
-                    engine: "nnue".to_string(),
-                    mode: stats.mode.to_string(),
-                    depth: stats.depth,
-                    budget: stats.budget,
-                    time_limit_ms: stats.time_limit_ms,
-                    nodes: stats.nodes,
-                    reached_depth: stats.reached_depth,
-                    elapsed_ms: stats.elapsed_ms,
-                }),
+                nnue_stats: Some(NnueStatsDto::from(&stats)),
                 score: None,
             })
         }

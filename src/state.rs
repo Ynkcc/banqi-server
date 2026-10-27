@@ -1,4 +1,4 @@
-use crate::app::envops::{StepOutcome, coords_for_action};
+use crate::app::envops::StepOutcome;
 use crate::app::mcts_view::MctsTree;
 pub use crate::app::models::EngineKind;
 use crate::app::player::{Agent, EngineParams, PlayerSlot, Slots, StrategyKind};
@@ -100,13 +100,12 @@ impl GameSession {
         self.core.legal_actions()
     }
     pub fn action_view(&self, action: usize) -> ActionView {
-        let coords = coords_for_action(self.core.variant, action).unwrap_or_default();
-        ActionView {
+        crate::app::view::derive_action_view(
+            self.core.variant,
             action,
-            from: coords.first().copied().unwrap_or(action),
-            to: coords.last().copied().unwrap_or(action),
-            is_chance: self.core.is_chance_action(action),
-        }
+            self.core.is_chance_action(action),
+        )
+        .into()
     }
     pub fn strategy_to_move(&self) -> bool {
         let (terminated, truncated, _) = self.over_state();
@@ -130,16 +129,8 @@ impl GameSession {
         let v = crate::app::view::game_view(&self.core);
         let s = &v.scalars;
         let over = s.terminated || s.truncated;
-        let legal_actions: Vec<ActionView> = v
-            .legal_actions
-            .iter()
-            .map(|a| ActionView {
-                action: a.action,
-                from: a.from,
-                to: a.to,
-                is_chance: a.is_chance,
-            })
-            .collect();
+        let legal_actions: Vec<ActionView> =
+            v.legal_actions.iter().cloned().map(ActionView::from).collect();
         let history: Vec<HistoryMoveView> = v
             .history
             .iter()

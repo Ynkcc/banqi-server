@@ -82,9 +82,7 @@ impl SnapshotSession {
         if self.is_over() {
             return Err(SessionError::GameOver);
         }
-        if !self.legal_actions().contains(&action) {
-            return Err(SessionError::IllegalAction { action });
-        }
+
         let prev = self.current.clone();
         self.history.push(prev.clone());
         let step_res = crate::with_env!(self.variant, &self.current, env => {
