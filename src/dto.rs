@@ -536,6 +536,9 @@ pub struct RecentGamesQuery {
 pub struct ReplayGameReq {
     #[serde(default)]
     pub slots: Option<SlotsReq>,
+
+    #[serde(default)]
+    pub from_ply: Option<usize>,
 }
 #[derive(Debug, Serialize)]
 pub struct GameCreatedResp {

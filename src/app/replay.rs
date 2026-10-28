@@ -111,6 +111,38 @@ pub fn build_replay(detail: &ArchivedGameDetail) -> Result<ReplayResp, String> {
     })
 }
 
+pub fn snapshot_at_ply(
+    detail: &ArchivedGameDetail,
+    ply: usize,
+) -> Result<PositionSnapshot, String> {
+    let variant = crate::config::parse_variant(&detail.summary.variant)
+        .ok_or_else(|| format!("未知变体: {}", detail.summary.variant))?;
+    let len = detail.moves.len();
+    if len == 0 || ply == 0 {
+        return PositionSnapshot::from_fen(detail.initial_fen.trim())
+            .map_err(|e| format!("归档初始局面解析失败: {e}"));
+    }
+    if ply >= len {
+        return Ok(final_snapshot(
+            detail,
+            &PositionSnapshot::from_fen(detail.initial_fen.trim())
+                .unwrap_or_else(|_| variant_initial_snapshot(variant)),
+        ));
+    }
+
+    let pre = if detail.snapshots.len() == len {
+        let hex = detail
+            .snapshots
+            .get(ply - 1)
+            .ok_or_else(|| format!("快照缺失: ply={ply}"))?;
+        let bytes = hex_decode(hex).ok_or("快照 hex 非法")?;
+        PositionSnapshot::decode(&bytes).map_err(|e| format!("快照解码失败: {e}"))?
+    } else {
+        replay_snapshots(variant, detail)?.swap_remove(ply - 1)
+    };
+    Ok(pre)
+}
+
 fn replay_snapshots(
     variant: Variant,
     detail: &ArchivedGameDetail,

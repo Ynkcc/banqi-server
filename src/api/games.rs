@@ -374,11 +374,17 @@ pub async fn replay_as_new_game(
     req: Option<Json<ReplayGameReq>>,
 ) -> Result<Json<GameCreatedResp>, ApiError> {
     let detail = find_archived(&app, &id)?;
-    let snap = PositionSnapshot::from_fen(detail.initial_fen.trim())
-        .map_err(|e| ApiError::Internal(format!("归档初始局面解析失败: {e}")))?;
+    let req = req.map(|Json(r)| r).unwrap_or(ReplayGameReq { slots: None, from_ply: None });
+    let from_ply = req.from_ply.unwrap_or(0);
+    let snap = if from_ply > 0 {
+        crate::app::replay::snapshot_at_ply(&detail, from_ply)
+            .map_err(ApiError::Internal)?
+    } else {
+        PositionSnapshot::from_fen(detail.initial_fen.trim())
+            .map_err(|e| ApiError::Internal(format!("归档初始局面解析失败: {e}")))?
+    };
     let variant = snap.variant;
-    let (slots, slot_labels) =
-        build_slots(&app, req.and_then(|Json(r)| r.slots).as_ref(), variant).await?;
+    let (slots, slot_labels) = build_slots(&app, req.slots.as_ref(), variant).await?;
     let new_id = Uuid::new_v4();
     let mut session = GameSession::from_snapshot(variant, snap, slots);
     session.slot_labels = slot_labels;
@@ -390,6 +396,7 @@ pub async fn replay_as_new_game(
     tracing::info!(
         archive = %id,
         game = %new_id,
+        from_ply,
         "从最近对局归档复演建局: variant={}",
         variant.as_str()
     );
