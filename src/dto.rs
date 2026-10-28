@@ -29,6 +29,9 @@ pub struct SlotReq {
     pub params: Option<SlotParamsReq>,
     #[serde(default)]
     pub agent_id: Option<String>,
+
+    #[serde(default)]
+    pub label: Option<String>,
 }
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -72,6 +75,9 @@ pub struct DryRunReq {
     pub model_file: Option<String>,
     #[serde(default)]
     pub agent_id: Option<String>,
+
+    #[serde(default)]
+    pub params: Option<SlotParamsReq>,
 }
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -130,6 +136,12 @@ pub struct SettingsReq {
 #[serde(rename_all = "camelCase")]
 pub struct MoveReq {
     pub action: usize,
+
+    #[serde(default)]
+    pub reveal: Option<i64>,
+
+    #[serde(default)]
+    pub mover: Option<String>,
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -141,6 +153,9 @@ pub struct UndoReq {
 #[serde(rename_all = "camelCase")]
 pub struct EngineMoveReq {
     pub fen: String,
+
+    #[serde(default)]
+    pub frames: Option<Vec<serde_json::Value>>,
 
     #[serde(default)]
     pub engine: Option<String>,
@@ -188,6 +203,8 @@ impl From<crate::app::view::ActionView> for ActionView {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SlotView {
     pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -213,6 +230,7 @@ impl SlotView {
     pub fn human() -> Self {
         Self {
             kind: "Human".to_string(),
+            label: None,
             agent_id: None,
             model_file: None,
             mcts_sims: None,
@@ -273,6 +291,9 @@ pub struct GameStateResp {
 pub struct HistoryMoveView {
     pub ply: usize,
     pub player: String,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mover: Option<String>,
     pub action: usize,
     pub from: usize,
     pub to: usize,
@@ -471,6 +492,8 @@ pub struct ReplayResp {
     pub initial_fen: String,
     pub initial_board: Vec<String>,
     pub initial_shown: Vec<bool>,
+    pub initial_scores: [i32; 2],
+    pub initial_hidden_bag: HiddenBagDto,
     pub final_board: Vec<String>,
     pub final_shown: Vec<bool>,
 
@@ -669,6 +692,9 @@ pub fn termination_label(reason: Option<&str>) -> String {
 }
 
 pub fn describe_side(slot: &SlotView) -> String {
+    if let Some(label) = slot.label.as_deref().filter(|s| !s.trim().is_empty()) {
+        return label.to_string();
+    }
     match slot.kind.as_str() {
         "Human" => "人类玩家".to_string(),
         "Agent" => {
@@ -693,4 +719,31 @@ fn model_short(file: &str) -> String {
         .and_then(|s| s.to_str())
         .unwrap_or(file)
         .to_string()
+}
+
+pub fn piece_from_display_code(code: i64) -> Option<banqi_core::core::env::types::Piece> {
+    use banqi_core::core::env::types::{Piece, PieceType, Player};
+    if !(0..14).contains(&code) {
+        return None;
+    }
+    let piece_type = match code % 7 {
+        0 => PieceType::Soldier,
+        1 => PieceType::Cannon,
+        2 => PieceType::Horse,
+        3 => PieceType::Chariot,
+        4 => PieceType::Elephant,
+        5 => PieceType::Advisor,
+        _ => PieceType::General,
+    };
+    let player = if code < 7 { Player::Red } else { Player::Black };
+    Some(Piece::new(piece_type, player))
+}
+
+pub fn mover_label(mover: Option<&str>, fallback: &str) -> String {
+    match mover {
+        Some("engine") => "引擎".to_string(),
+        Some("enemy") => "敌人".to_string(),
+        Some(other) => other.to_string(),
+        None => fallback.to_string(),
+    }
 }

@@ -10,10 +10,44 @@ use crate::dto::{
 use crate::error::ApiError;
 use crate::state::SharedState;
 use crate::web;
-use axum::extract::State;
+use axum::extract::{Request, State};
+use axum::http::{HeaderValue, Method, StatusCode, header};
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use banqi_core::core::env::Variant;
+
+async fn cors(req: Request, next: Next) -> Response {
+    let origin = req.headers().get(header::ORIGIN).cloned();
+    if req.method() == Method::OPTIONS {
+        let mut res = StatusCode::OK.into_response();
+        if let Some(o) = origin {
+            res.headers_mut()
+                .insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, o);
+        }
+        let h = res.headers_mut();
+        h.insert(
+            header::ACCESS_CONTROL_ALLOW_METHODS,
+            HeaderValue::from_static("GET, POST, PUT, DELETE, OPTIONS"),
+        );
+        h.insert(
+            header::ACCESS_CONTROL_ALLOW_HEADERS,
+            HeaderValue::from_static("Content-Type"),
+        );
+        h.insert(
+            header::ACCESS_CONTROL_MAX_AGE,
+            HeaderValue::from_static("86400"),
+        );
+        return res;
+    }
+    let mut res = next.run(req).await;
+    if let Some(o) = origin {
+        res.headers_mut()
+            .insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, o);
+    }
+    res
+}
 pub fn router(state: SharedState) -> Router {
     Router::new()
         .route(
@@ -73,6 +107,7 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/engine/move", post(engine::engine_move))
         .with_state(state)
         .fallback(web::handler)
+        .layer(middleware::from_fn(cors))
 }
 pub fn parse_variant_or_err(s: &str) -> Result<Variant, ApiError> {
     crate::config::parse_variant(s).ok_or_else(|| {

@@ -83,7 +83,9 @@ pub fn build_replay(detail: &ArchivedGameDetail) -> Result<ReplayResp, String> {
         });
     }
 
-    let (initial_board, initial_shown, _) = god_view(&per_ply(0));
+    let initial_snap = per_ply(0);
+    let (initial_board, initial_shown, initial_hidden_bag) = god_view(&initial_snap);
+    let initial_scores = initial_snap.scores;
     let final_snap = final_snapshot(detail, &per_ply(detail.moves.len().saturating_sub(1)));
     let (final_board, final_shown, final_hidden_bag) = god_view(&final_snap);
     let final_scores = final_snap.scores;
@@ -98,6 +100,8 @@ pub fn build_replay(detail: &ArchivedGameDetail) -> Result<ReplayResp, String> {
         initial_fen: detail.initial_fen.clone(),
         initial_board,
         initial_shown,
+        initial_scores,
+        initial_hidden_bag,
         final_board,
         final_shown,
         final_scores,
@@ -164,11 +168,7 @@ fn variant_initial_snapshot(variant: Variant) -> PositionSnapshot {
 }
 
 fn player_name(m: &HistoryMoveView) -> String {
-    match m.player.as_str() {
-        "Red" => "Red".to_string(),
-        "Black" => "Black".to_string(),
-        other => other.to_string(),
-    }
+    crate::dto::mover_label(m.mover.as_deref(), &m.player)
 }
 
 fn step_kind(m: &HistoryMoveView) -> &'static str {

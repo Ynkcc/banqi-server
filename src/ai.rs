@@ -174,17 +174,20 @@ pub async fn run_strategy_turn(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn human_move(
     app: &SharedState,
     game_id: Uuid,
     id: &str,
     action: usize,
+    reveal: Option<banqi_core::core::env::types::Piece>,
+    mover_label: Option<String>,
 ) -> Result<MoveResp, ApiError> {
     let (mut state, mover, human_view, strategy_version) = {
         let mut games = write_lock(&app.games);
         let s = get_mut_session(&mut games, id, game_id)?;
         let mover = s.core.current.current_player;
-        let outcome = s.apply_action(action)?;
+        let outcome = s.apply_action_with_reveal(action, reveal, mover_label)?;
         if outcome.is_over() {
             app.archive_session(game_id, s);
         }
@@ -340,7 +343,7 @@ pub async fn run_dry_run(
                                 ))
                             })?,
                         };
-                        let params = app.params();
+                        let params = app.slot_params(req.params.as_ref())?;
                         let model_file = if kind.needs_model() {
                             Some(app.resolve_model_file(req.model_file.as_deref(), variant)?)
                         } else {

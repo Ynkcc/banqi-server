@@ -1,7 +1,8 @@
 use crate::app::envops::{self, StepOutcome};
 use banqi_core::core::env::error::EnvError;
+use banqi_core::core::env::types::Piece;
 use banqi_core::core::env::{
-    GameEnv, MoveHistory, MoveRecord, PositionSnapshot, SnapshotEnv, Variant,
+    DarkChessEnv, GameEnv, MoveHistory, MoveRecord, PositionSnapshot, SnapshotEnv, Variant,
 };
 use std::fmt;
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,6 +102,50 @@ impl SnapshotSession {
             Err(e) => {
                 self.history.pop();
                 Err(SessionError::from(e))
+            }
+        }
+    }
+
+    pub fn apply_action_with_reveal(
+        &mut self,
+        action: usize,
+        reveal: Option<Piece>,
+    ) -> Result<StepOutcome, SessionError> {
+        if self.is_over() {
+            return Err(SessionError::GameOver);
+        }
+        let prev = self.current.clone();
+        let mut env = <DarkChessEnv as SnapshotEnv>::from_snapshot(&prev)
+            .map_err(|e| SessionError::Internal(format!("重建环境失败: {e}")))?;
+        let is_chance = GameEnv::is_chance_action(&env, action);
+        let reveal = if is_chance { reveal } else { None };
+        if is_chance && reveal.is_none() {
+            return Err(SessionError::BadRequest(
+                "chance 动作（翻子/炮击暗子）必须提供 reveal 棋子（明子码 0-13）".to_string(),
+            ));
+        }
+        self.history.push(prev.clone());
+        let step_res = env
+            .step(action, reveal)
+            .map(|(_, terminated, truncated, winner)| StepOutcome {
+                terminated,
+                truncated,
+                winner,
+            })
+            .map_err(SessionError::from);
+        match step_res {
+            Ok(outcome) => {
+                let post = env.to_snapshot();
+                let revealed = GameEnv::last_revealed(&env);
+                self.history
+                    .record(MoveRecord::from_step(&prev, &post, action, revealed));
+                self.current = post;
+                self.version += 1;
+                Ok(outcome)
+            }
+            Err(e) => {
+                self.history.pop();
+                Err(e)
             }
         }
     }

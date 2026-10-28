@@ -31,7 +31,23 @@ pub struct GameSession {
     pub expectimax_tree: Option<crate::app::expectimax_view::ExpectimaxTree>,
 
     pub step_stats: Vec<Option<crate::dto::StepStatsDto>>,
+
+    pub movers: Vec<Option<String>>,
+
+    pub slot_labels: [Option<String>; 2],
     pub created_at: u64,
+}
+impl GameSession {
+    pub fn set_slot_label(
+        &mut self,
+        player: banqi_core::core::env::types::Player,
+        label: Option<String>,
+    ) {
+        self.slot_labels[match player {
+            banqi_core::core::env::types::Player::Red => 0,
+            banqi_core::core::env::types::Player::Black => 1,
+        }] = label;
+    }
 }
 impl GameSession {
     #[allow(dead_code)]
@@ -42,6 +58,8 @@ impl GameSession {
             mcts_tree: None,
             expectimax_tree: None,
             step_stats: Vec::new(),
+            movers: Vec::new(),
+            slot_labels: [None, None],
             created_at: unix_now(),
         }
     }
@@ -57,6 +75,8 @@ impl GameSession {
             mcts_tree: None,
             expectimax_tree: None,
             step_stats: Vec::new(),
+            movers: Vec::new(),
+            slot_labels: [None, None],
             created_at: unix_now(),
         })
     }
@@ -67,6 +87,8 @@ impl GameSession {
             mcts_tree: None,
             expectimax_tree: None,
             step_stats: Vec::new(),
+            movers: Vec::new(),
+            slot_labels: [None, None],
             created_at: unix_now(),
         }
     }
@@ -76,14 +98,31 @@ impl GameSession {
     pub fn apply_action(&mut self, action: usize) -> Result<StepOutcome, ApiError> {
         self.core.apply_action(action).map_err(ApiError::from)
     }
+
+    pub fn apply_action_with_reveal(
+        &mut self,
+        action: usize,
+        reveal: Option<banqi_core::core::env::types::Piece>,
+        mover: Option<String>,
+    ) -> Result<StepOutcome, ApiError> {
+        let outcome = self
+            .core
+            .apply_action_with_reveal(action, reveal)
+            .map_err(ApiError::from)?;
+        self.movers.truncate(self.core.history.records().len());
+        self.movers.push(mover);
+        Ok(outcome)
+    }
     pub fn undo(&mut self, steps: usize) -> Result<(), ApiError> {
         self.core.undo_steps(steps).map_err(ApiError::from)?;
         self.step_stats.truncate(self.core.history.records().len());
+        self.movers.truncate(self.core.history.records().len());
         Ok(())
     }
     pub fn undo_to_current_player(&mut self) -> Result<(), ApiError> {
         self.core.undo_to_current_player().map_err(ApiError::from)?;
         self.step_stats.truncate(self.core.history.records().len());
+        self.movers.truncate(self.core.history.records().len());
         Ok(())
     }
 
@@ -123,8 +162,8 @@ impl GameSession {
     }
     pub fn view(&self, game_id: Uuid) -> GameStateResp {
         let slots_view = SlotsView {
-            red: slot_view(&self.slots.red),
-            black: slot_view(&self.slots.black),
+            red: labeled_slot_view(&self.slots.red, self.slot_labels[0].clone()),
+            black: labeled_slot_view(&self.slots.black, self.slot_labels[1].clone()),
         };
         let v = crate::app::view::game_view(&self.core);
         let s = &v.scalars;
@@ -141,6 +180,7 @@ impl GameSession {
             .map(|e| HistoryMoveView {
                 ply: e.ply,
                 player: crate::app::common::player_label(e.player),
+                mover: self.movers.get(e.ply.saturating_sub(1)).cloned().flatten(),
                 action: e.action,
                 from: e.from,
                 to: e.to,
@@ -258,6 +298,7 @@ pub fn strategy_slot_view(
     };
     SlotView {
         kind: kind.as_str().to_string(),
+        label: None,
         agent_id: None,
         model_file,
         mcts_sims: kind.is_mcts().then_some(params.mcts_sims),
@@ -283,6 +324,12 @@ fn slot_view(slot: &PlayerSlot) -> SlotView {
             params,
         } => strategy_slot_view(*kind, model_file.clone(), *params),
     }
+}
+
+fn labeled_slot_view(slot: &PlayerSlot, label: Option<String>) -> SlotView {
+    let mut v = slot_view(slot);
+    v.label = label;
+    v
 }
 pub struct AppState {
     pub config: ServerConfig,
@@ -399,6 +446,40 @@ impl AppState {
             }
         }
         tracing::info!(game = %game_id, "对局终局，已归档至最近对局记录（共 {} 条）", recent.len());
+    }
+
+    pub fn archive_session_final(&self, game_id: Uuid, s: &GameSession) {
+        if self.config.recent_games == 0 {
+            return;
+        }
+        {
+            let recent = lock(&self.recent);
+            if recent
+                .iter()
+                .any(|g| g.summary.game_id == game_id.to_string())
+            {
+                return;
+            }
+        }
+        let mut detail = s.archived_detail(game_id, unix_now());
+        if !detail.summary.over {
+            detail.summary.over = true;
+            detail.summary.over_reason = Some("abandoned".to_string());
+        }
+        self.persist_archive(&detail);
+        let mut recent = lock(&self.recent);
+        recent.push_front(detail);
+        while recent.len() > self.config.recent_games {
+            match recent.pop_back() {
+                Some(removed) => {
+                    if let Ok(id) = Uuid::parse_str(&removed.summary.game_id) {
+                        self.remove_archive_file(id);
+                    }
+                }
+                None => break,
+            }
+        }
+        tracing::info!(game = %game_id, "外部对局结束，已强制归档至最近对局记录（共 {} 条）", recent.len());
     }
     fn archive_file(&self, game_id: Uuid) -> Option<PathBuf> {
         self.config
@@ -795,6 +876,33 @@ mod tests {
         assert!(s.undoable());
         s.undo_to_current_player().expect("悔棋应成功");
         assert_eq!(s.core.version, 3);
+    }
+    #[test]
+    fn apply_action_with_reveal_records_mover() {
+        use crate::dto::piece_from_display_code;
+        let mut s = GameSession::new(Variant::DarkChess4x8, Slots::all_human());
+        let flip = *s
+            .legal_actions()
+            .iter()
+            .find(|&&a| s.action_view(a).is_chance)
+            .expect("初始局面必有可翻棋动作");
+        assert!(
+            s.apply_action_with_reveal(flip, None, None).is_err(),
+            "chance 动作缺 reveal 应报错"
+        );
+        let piece = piece_from_display_code(6).expect("6 = 红帅");
+        s.apply_action_with_reveal(flip, Some(piece), Some("engine".into()))
+            .expect("显式 reveal 落子应成功");
+        let v = s.view(Uuid::new_v4());
+        assert_eq!(v.history[0].mover.as_deref(), Some("engine"));
+        assert_eq!(
+            v.history[0].revealed.as_deref(),
+            Some(piece.short_name()).as_deref()
+        );
+
+        s.undo(1).expect("悔棋应成功");
+        assert!(s.view(Uuid::new_v4()).history.is_empty());
+        assert!(s.movers.is_empty());
     }
     #[test]
     fn read_write_lock_recovery_helpers() {

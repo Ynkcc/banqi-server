@@ -17,6 +17,23 @@ pub async fn engine_move(
     }
     let snap = PositionSnapshot::from_fen(fen)
         .map_err(|e| ApiError::BadRequest(format!("BFEN 局面解析失败: {e}")))?;
+
+    let snap = match req.frames.as_deref() {
+        Some(frames) if !frames.is_empty() => {
+            match crate::app::ffq_frames::replay_frames(&snap, frames) {
+                Ok(replayed) => {
+                    tracing::info!(
+                        "engine/move: 帧回放成功（{} 手，chase 窗口 {} 项）",
+                        replayed.total_step_counter,
+                        replayed.chase_moves.len()
+                    );
+                    replayed
+                }
+                Err(e) => return Err(ApiError::BadRequest(format!("事件帧回放失败: {e}"))),
+            }
+        }
+        _ => snap,
+    };
     let variant = snap.variant;
     let current_player = crate::dto::player_str(snap.current_player);
     let session = GameSession::from_snapshot(

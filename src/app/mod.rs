@@ -1,6 +1,7 @@
 pub mod common;
 pub mod envops;
 pub mod expectimax_view;
+pub mod ffq_frames;
 pub mod mcts_view;
 pub mod replay;
 pub mod models;
