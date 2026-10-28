@@ -65,7 +65,7 @@ pub fn build_replay(detail: &ArchivedGameDetail) -> Result<ReplayResp, String> {
         let (board, revealed_at, hidden_bag) = god_view(&snap);
         moves.push(ReplayStepDto {
             ply: i + 1,
-            player: player_name(m),
+            player: m.player.clone(),
             action: m.action,
             from: m.from,
             to: m.to,
@@ -165,10 +165,6 @@ fn variant_initial_snapshot(variant: Variant) -> PositionSnapshot {
     banqi_core::for_variant_env!(variant, E => {
         <E as Default>::default().to_snapshot()
     })
-}
-
-fn player_name(m: &HistoryMoveView) -> String {
-    crate::dto::mover_label(m.mover.as_deref(), &m.player)
 }
 
 fn step_kind(m: &HistoryMoveView) -> &'static str {

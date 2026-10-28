@@ -187,7 +187,18 @@ pub async fn human_move(
         let mut games = write_lock(&app.games);
         let s = get_mut_session(&mut games, id, game_id)?;
         let mover = s.core.current.current_player;
-        let outcome = s.apply_action_with_reveal(action, reveal, mover_label)?;
+        let outcome = s
+            .apply_action_with_reveal(action, reveal, mover_label)
+            .map_err(|e| {
+                tracing::warn!(
+                    game = %game_id,
+                    action,
+                    reveal = ?reveal.map(|p| p.short_name()),
+                    "落子被拒: {e}，当前局面: {}",
+                    s.core.current.to_fen()
+                );
+                e
+            })?;
         if outcome.is_over() {
             app.archive_session(game_id, s);
         }
