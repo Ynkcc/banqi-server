@@ -118,12 +118,8 @@ impl SnapshotSession {
         let mut env = <DarkChessEnv as SnapshotEnv>::from_snapshot(&prev)
             .map_err(|e| SessionError::Internal(format!("重建环境失败: {e}")))?;
         let is_chance = GameEnv::is_chance_action(&env, action);
+
         let reveal = if is_chance { reveal } else { None };
-        if is_chance && reveal.is_none() {
-            return Err(SessionError::BadRequest(
-                "chance 动作（翻子/炮击暗子）必须提供 reveal 棋子（明子码 0-13）".to_string(),
-            ));
-        }
         self.history.push(prev.clone());
         let step_res = env
             .step(action, reveal)

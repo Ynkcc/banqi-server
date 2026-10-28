@@ -886,10 +886,11 @@ mod tests {
             .iter()
             .find(|&&a| s.action_view(a).is_chance)
             .expect("初始局面必有可翻棋动作");
-        assert!(
-            s.apply_action_with_reveal(flip, None, None).is_err(),
-            "chance 动作缺 reveal 应报错"
-        );
+        s.apply_action_with_reveal(flip, None, None)
+            .expect("chance 动作缺 reveal 应回退为随机抽取暗子");
+        s.undo(1).expect("悔棋应成功");
+        let v0 = s.view(Uuid::new_v4());
+        assert!(v0.history.is_empty());
         let piece = piece_from_display_code(6).expect("6 = 红帅");
         s.apply_action_with_reveal(flip, Some(piece), Some("engine".into()))
             .expect("显式 reveal 落子应成功");

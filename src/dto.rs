@@ -142,6 +142,12 @@ pub struct MoveReq {
 
     #[serde(default)]
     pub mover: Option<String>,
+
+    #[serde(default)]
+    pub note: Option<String>,
+
+    #[serde(default)]
+    pub diag: Option<StepStatsDto>,
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -264,6 +270,9 @@ pub struct SuggestionResp {
     pub mcts_stats: Option<MctsStatsDto>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nnue_stats: Option<NnueStatsDto>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub search_info: Option<crate::nnue::ExRootInfo>,
 }
 #[derive(Debug, Serialize)]
 pub struct GameStateResp {
@@ -438,10 +447,13 @@ pub struct StepStatsDto {
     pub mcts: Option<MctsStatsDto>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub nnue: Option<NnueStatsDto>,
+
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub note: Option<String>,
 }
 impl StepStatsDto {
     pub fn is_empty(&self) -> bool {
-        self.mcts.is_none() && self.nnue.is_none()
+        self.mcts.is_none() && self.nnue.is_none() && self.note.is_none()
     }
 }
 

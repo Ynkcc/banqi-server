@@ -523,6 +523,7 @@ mod tests {
         s.capture_step_stats(StepStatsDto {
             mcts: None,
             nnue: d.nnue_stats.clone(),
+            note: None,
         });
         let detail = s.archived_detail(uuid::Uuid::new_v4(), 1_000);
         let step = detail.step_stats[0]

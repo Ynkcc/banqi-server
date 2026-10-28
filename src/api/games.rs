@@ -197,7 +197,17 @@ pub async fn move_piece(
         })?),
     };
     Ok(Json(
-        ai::human_move(&app, game_id, &id, req.action, reveal, req.mover).await?,
+        ai::human_move(
+            &app,
+            game_id,
+            &id,
+            req.action,
+            reveal,
+            req.mover,
+            req.note,
+            req.diag,
+        )
+        .await?,
     ))
 }
 pub async fn run(

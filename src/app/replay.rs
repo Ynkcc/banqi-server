@@ -289,6 +289,7 @@ mod tests {
                         elapsed_ms: 40,
                     }),
                     nnue: None,
+                    note: None,
                 });
             }
         }

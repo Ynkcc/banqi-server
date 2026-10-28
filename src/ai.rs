@@ -118,6 +118,7 @@ fn apply_strategy_action(
     s.capture_step_stats(crate::dto::StepStatsDto {
         mcts: mcts_stats.clone(),
         nnue: nnue_stats.clone(),
+        note: None,
     });
     if outcome.is_over() {
         app.archive_session(game_id, s);
@@ -182,6 +183,8 @@ pub async fn human_move(
     action: usize,
     reveal: Option<banqi_core::core::env::types::Piece>,
     mover_label: Option<String>,
+    note: Option<String>,
+    diag: Option<crate::dto::StepStatsDto>,
 ) -> Result<MoveResp, ApiError> {
     let (mut state, mover, human_view, strategy_version) = {
         let mut games = write_lock(&app.games);
@@ -199,6 +202,14 @@ pub async fn human_move(
                 );
                 e
             })?;
+
+        if note.is_some() || diag.is_some() {
+            let mut stats = diag.unwrap_or_default();
+            if stats.note.is_none() {
+                stats.note = note;
+            }
+            s.capture_step_stats(stats);
+        }
         if outcome.is_over() {
             app.archive_session(game_id, s);
         }
@@ -382,10 +393,13 @@ pub async fn run_dry_run(
         && !is_flip
         && view.from != view.to
         && matches!(s.core.current.slots.get(view.to), Some(Slot::Revealed(_)));
+
+    let search_info = decision.ex_tree.as_ref().and_then(ex_root_info);
     if s.core.version == version {
         s.mcts_tree = decision.mcts_tree;
         s.expectimax_tree = decision.ex_tree;
     }
+
     tracing::debug!(game = %game_id, "dry-run 建议: action={}（version={version}）", decision.action);
     Ok(SuggestionResp {
         version,
@@ -399,5 +413,6 @@ pub async fn run_dry_run(
         score: decision.score,
         mcts_stats: decision.mcts_stats,
         nnue_stats: decision.nnue_stats,
+        search_info,
     })
 }
