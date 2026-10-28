@@ -80,6 +80,18 @@ pub async fn create_game(
         Some(fen) if !fen.trim().is_empty() => {
             let snap = PositionSnapshot::from_fen(fen.trim())
                 .map_err(|e| ApiError::BadRequest(format!("BFEN 局面解析失败: {e}")))?;
+
+            {
+                let s = GameSession::from_snapshot(
+                    snap.variant,
+                    snap.clone(),
+                    crate::app::player::Slots::all_human(),
+                );
+                let (terminated, truncated, _) = s.over_state();
+                if terminated || truncated {
+                    return Err(ApiError::GameOver);
+                }
+            }
             if let Some(s) = req.variant.as_deref() {
                 let want = parse_variant_or_err(s)?;
                 if want != snap.variant {
