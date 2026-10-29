@@ -21,6 +21,7 @@ banqi-core = { path = "../banqi-core/crates/banqi-core" }
 banqi-engine = { path = "../banqi-engine" }
 bq-inference = { path = "../banqi-engine/crates/bq-inference" }
 bq-util = { path = "../banqi-core/crates/bq-util" }
+bq-replay = { path = "../banqi-core/crates/bq-replay" }
 # HTTP API
 axum = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }

@@ -1,113 +1,20 @@
-use banqi_core::core::env::types::{Piece, PieceType, Player, Slot};
-use banqi_core::core::env::{PositionSnapshot, SnapshotEnv, Variant};
+use banqi_core::core::env::{PositionSnapshot, Variant};
 
 use bqsrv_dto::{
-    ArchivedGameDetail, HiddenBagDto, HistoryMoveView, ReplayResp, ReplayStepDto, describe_side,
-    hex_decode, termination_label,
+    describe_side, hex_decode, termination_label, ArchivedGameDetail, ReplayResp, ReplayStepDto,
 };
 
-pub const SOURCE_SNAPSHOT: &str = "snapshot";
-pub const SOURCE_REPLAY: &str = "replay";
+use bq_replay::{ReplayGame, ReplayInput, ReplayMove};
+
+pub const SOURCE_SNAPSHOT: &str = bq_replay::SOURCE_SNAPSHOT;
+pub const SOURCE_REPLAY: &str = bq_replay::SOURCE_REPLAY;
 
 pub fn build_replay(detail: &ArchivedGameDetail) -> Result<ReplayResp, String> {
     let variant = bqsrv_config::parse_variant(&detail.summary.variant)
         .ok_or_else(|| format!("未知变体: {}", detail.summary.variant))?;
-    let positions = {
-        let cfg = variant.config();
-        cfg.rows * cfg.cols
-    };
-
-    let snaps: Option<Vec<PositionSnapshot>> =
-        if detail.snapshots.len() == detail.moves.len() && !detail.moves.is_empty() {
-            detail
-                .snapshots
-                .iter()
-                .map(|hex| {
-                    let bytes = hex_decode(hex).ok_or("快照 hex 非法")?;
-                    PositionSnapshot::decode(&bytes)
-                        .map_err(|e| format!("快照解码失败: {e}"))
-                        .inspect(|s| {
-                            debug_assert_eq!(s.slots.len(), positions, "快照槽位数应与变体一致");
-                        })
-                })
-                .collect::<Result<Vec<_>, String>>()
-                .ok()
-        } else {
-            None
-        };
-    let board_source = if snaps.is_some() {
-        SOURCE_SNAPSHOT
-    } else {
-        SOURCE_REPLAY
-    };
-
-    let replay_snaps = if snaps.is_none() && !detail.moves.is_empty() {
-        Some(replay_snapshots(variant, detail)?)
-    } else {
-        None
-    };
-    let per_ply = |i: usize| -> PositionSnapshot {
-        if let Some(v) = &snaps {
-            v[i].clone()
-        } else if let Some(v) = &replay_snaps {
-            v[i].clone()
-        } else {
-            PositionSnapshot::from_fen(detail.initial_fen.trim())
-                .unwrap_or_else(|_| crate::app::envops::initial_snapshot(variant))
-        }
-    };
-
-    let mut moves = Vec::with_capacity(detail.moves.len());
-    for (i, m) in detail.moves.iter().enumerate() {
-        let kind = step_kind(m);
-        let snap = per_ply(i);
-        let (board, revealed_at, hidden_bag) = god_view(&snap);
-        moves.push(ReplayStepDto {
-            ply: i + 1,
-            player: m.player.clone(),
-            action: m.action,
-            from: m.from,
-            to: m.to,
-            kind: kind.to_string(),
-            is_chance: m.is_chance,
-            revealed: m.revealed.clone(),
-            captured: m.captured.clone(),
-            move_counter: post_move_counter(kind, snap.move_counter),
-            scores: snap.scores,
-            board,
-            revealed_at,
-            hidden_bag,
-            board_source: board_source.to_string(),
-            stats: detail.step_stats.get(i).cloned().flatten(),
-        });
-    }
-
-    let initial_snap = per_ply(0);
-    let (initial_board, initial_shown, initial_hidden_bag) = god_view(&initial_snap);
-    let initial_scores = initial_snap.scores;
-    let final_snap = final_snapshot(detail, &per_ply(detail.moves.len().saturating_sub(1)));
-    let (final_board, final_shown, final_hidden_bag) = god_view(&final_snap);
-    let final_scores = final_snap.scores;
-
-    Ok(ReplayResp {
-        game_id: detail.summary.game_id.clone(),
-        variant: detail.summary.variant.clone(),
-        termination: termination_label(detail.summary.over_reason.as_deref()),
-        winner: detail.summary.winner.clone(),
-        side_red: describe_side(&detail.summary.slots.red),
-        side_black: describe_side(&detail.summary.slots.black),
-        initial_fen: detail.initial_fen.clone(),
-        initial_board,
-        initial_shown,
-        initial_scores,
-        initial_hidden_bag,
-        final_board,
-        final_shown,
-        final_scores,
-        final_hidden_bag,
-        board_source: board_source.to_string(),
-        moves,
-    })
+    let input = to_replay_input(variant, detail);
+    let game = bq_replay::build_replay(&input)?;
+    Ok(to_replay_resp(detail, game))
 }
 
 pub fn snapshot_at_ply(
@@ -116,141 +23,95 @@ pub fn snapshot_at_ply(
 ) -> Result<PositionSnapshot, String> {
     let variant = bqsrv_config::parse_variant(&detail.summary.variant)
         .ok_or_else(|| format!("未知变体: {}", detail.summary.variant))?;
-    let len = detail.moves.len();
-    if len == 0 || ply == 0 {
-        return PositionSnapshot::from_fen(detail.initial_fen.trim())
-            .map_err(|e| format!("归档初始局面解析失败: {e}"));
-    }
-    if ply >= len {
-        return Ok(final_snapshot(
-            detail,
-            &PositionSnapshot::from_fen(detail.initial_fen.trim())
-                .unwrap_or_else(|_| crate::app::envops::initial_snapshot(variant)),
-        ));
-    }
+    let input = to_replay_input(variant, detail);
+    bq_replay::snapshot_at_ply(&input, ply)
+}
 
-    let pre = if detail.snapshots.len() == len {
-        let hex = detail
+fn to_replay_input(variant: Variant, detail: &ArchivedGameDetail) -> ReplayInput {
+    let snapshots = if detail.snapshots.len() == detail.moves.len() && !detail.moves.is_empty() {
+        detail
             .snapshots
-            .get(ply - 1)
-            .ok_or_else(|| format!("快照缺失: ply={ply}"))?;
-        let bytes = hex_decode(hex).ok_or("快照 hex 非法")?;
-        PositionSnapshot::decode(&bytes).map_err(|e| format!("快照解码失败: {e}"))?
+            .iter()
+            .map(|hex| hex_decode(hex))
+            .collect::<Option<Vec<_>>>()
+            .unwrap_or_default()
     } else {
-        replay_snapshots(variant, detail)?.swap_remove(ply - 1)
+        Vec::new()
     };
-    Ok(pre)
+    let moves = detail.moves.iter().map(|m| ReplayMove {
+        player: m.player.clone(),
+        action: m.action,
+        from: m.from,
+        to: m.to,
+        is_flip: m.is_flip,
+        is_chance: m.is_chance,
+        is_capture: m.is_capture,
+        revealed: m.revealed.clone(),
+        captured: m.captured.clone(),
+    });
+    ReplayInput {
+        variant,
+        initial_fen: Some(detail.initial_fen.clone()),
+        initial_layout: None,
+        snapshots,
+        final_snapshot: detail.final_snapshot.as_deref().and_then(hex_decode),
+        final_fen: Some(detail.final_fen.clone()),
+        moves: moves.collect(),
+    }
 }
 
-fn replay_snapshots(
-    variant: Variant,
-    detail: &ArchivedGameDetail,
-) -> Result<Vec<PositionSnapshot>, String> {
-    let mut snap = PositionSnapshot::from_fen(detail.initial_fen.trim())
-        .map_err(|e| format!("归档初始局面解析失败: {e}"))?;
-    let mut out = Vec::with_capacity(detail.moves.len());
-    for (i, m) in detail.moves.iter().enumerate() {
-        out.push(snap.clone());
-
-        let reveal = m.revealed.as_deref().and_then(short_name_to_piece);
-        snap = crate::with_env!(variant, &snap, env => {
-            env.step_with_reveal(m.action, reveal).map(|_| env.to_snapshot())
+fn to_replay_resp(detail: &ArchivedGameDetail, game: ReplayGame) -> ReplayResp {
+    let moves = game
+        .moves
+        .into_iter()
+        .enumerate()
+        .map(|(i, s)| ReplayStepDto {
+            ply: s.ply,
+            player: s.player,
+            action: s.action,
+            from: s.from,
+            to: s.to,
+            kind: s.kind.as_str().to_string(),
+            is_chance: s.is_chance,
+            revealed: s.revealed,
+            captured: s.captured,
+            move_counter: s.move_counter,
+            scores: s.scores,
+            board: s.board,
+            revealed_at: s.revealed_at,
+            hidden_bag: bqsrv_dto::HiddenBagDto {
+                red: s.hidden_bag.red,
+                black: s.hidden_bag.black,
+            },
+            board_source: s.board_source,
+            stats: detail.step_stats.get(i).cloned().flatten(),
         })
-        .and_then(std::convert::identity)
-        .map_err(|e| format!("第 {} 步（action={}）动作重放失败: {e}", i + 1, m.action))?;
-    }
-    Ok(out)
-}
+        .collect();
 
-fn short_name_to_piece(s: &str) -> Option<Piece> {
-    let (p, t) = s.split_once('_')?;
-    let player = match p {
-        "R" => Player::Red,
-        "B" => Player::Black,
-        _ => return None,
-    };
-    let piece_type = match t {
-        "Sol" => PieceType::Soldier,
-        "Can" => PieceType::Cannon,
-        "Hor" => PieceType::Horse,
-        "Cha" => PieceType::Chariot,
-        "Ele" => PieceType::Elephant,
-        "Adv" => PieceType::Advisor,
-        "Gen" => PieceType::General,
-        _ => return None,
-    };
-    Some(Piece::new(piece_type, player))
-}
-
-fn final_snapshot(detail: &ArchivedGameDetail, fallback: &PositionSnapshot) -> PositionSnapshot {
-    if let Some(hex) = &detail.final_snapshot
-        && let Some(bytes) = hex_decode(hex)
-        && let Ok(snap) = PositionSnapshot::decode(&bytes)
-    {
-        return snap;
-    }
-    PositionSnapshot::from_fen(detail.final_fen.trim()).unwrap_or_else(|_| fallback.clone())
-}
-
-fn step_kind(m: &HistoryMoveView) -> &'static str {
-    if m.is_flip {
-        "flip"
-    } else if m.is_chance {
-        "reveal-attack"
-    } else if m.is_capture {
-        "capture"
-    } else {
-        "move"
-    }
-}
-
-fn post_move_counter(kind: &str, pre: u32) -> u32 {
-    if kind == "move" { pre + 1 } else { 0 }
-}
-
-fn god_view(snap: &PositionSnapshot) -> (Vec<String>, Vec<bool>, HiddenBagDto) {
-    let mut board = Vec::with_capacity(snap.slots.len());
-    let mut shown = Vec::with_capacity(snap.slots.len());
-    let mut bag = HiddenBagDto::default();
-    for p in &snap.hidden_bag {
-        count_hidden(&mut bag, p);
-    }
-    for (sq, slot) in snap.slots.iter().enumerate() {
-        match slot {
-            Slot::Empty => {
-                board.push("Empty".to_string());
-                shown.push(true);
-            }
-            Slot::Hidden => {
-                let identity = snap
-                    .true_board
-                    .as_deref()
-                    .and_then(|tb| tb.get(sq))
-                    .copied();
-                match identity {
-                    Some(p) => board.push(p.short_name()),
-                    None => board.push("Hidden".to_string()),
-                }
-                shown.push(false);
-            }
-            Slot::Revealed(p) => {
-                board.push(p.short_name());
-                shown.push(true);
-            }
-        }
-    }
-    (board, shown, bag)
-}
-
-fn count_hidden(bag: &mut HiddenBagDto, p: &Piece) {
-    let arr = if p.player == Player::Red {
-        &mut bag.red
-    } else {
-        &mut bag.black
-    };
-    let idx = p.piece_type as usize;
-    if idx < arr.len() {
-        arr[idx] = arr[idx].saturating_add(1);
+    ReplayResp {
+        game_id: detail.summary.game_id.clone(),
+        variant: detail.summary.variant.clone(),
+        termination: termination_label(detail.summary.over_reason.as_deref()),
+        winner: detail.summary.winner.clone(),
+        side_red: describe_side(&detail.summary.slots.red),
+        side_black: describe_side(&detail.summary.slots.black),
+        initial_fen: detail.initial_fen.clone(),
+        initial_board: game.initial_board,
+        initial_shown: game.initial_shown,
+        initial_scores: game.initial_scores,
+        initial_hidden_bag: bqsrv_dto::HiddenBagDto {
+            red: game.initial_hidden_bag.red,
+            black: game.initial_hidden_bag.black,
+        },
+        final_board: game.final_board,
+        final_shown: game.final_shown,
+        final_scores: game.final_scores,
+        final_hidden_bag: bqsrv_dto::HiddenBagDto {
+            red: game.final_hidden_bag.red,
+            black: game.final_hidden_bag.black,
+        },
+        board_source: game.board_source,
+        moves,
     }
 }
 
@@ -258,6 +119,7 @@ fn count_hidden(bag: &mut HiddenBagDto, p: &Piece) {
 mod tests {
     use super::*;
     use crate::state::GameSession;
+    use bqsrv_dto::HistoryMoveView;
 
     fn play_session(steps: usize) -> GameSession {
         let mut s = GameSession::new(
@@ -294,6 +156,18 @@ mod tests {
         s.archived_detail(uuid::Uuid::new_v4(), 1_000)
     }
 
+    fn kind_str(m: &HistoryMoveView) -> &'static str {
+        if m.is_flip {
+            "flip"
+        } else if m.is_chance {
+            "reveal-attack"
+        } else if m.is_capture {
+            "capture"
+        } else {
+            "move"
+        }
+    }
+
     #[test]
     fn snapshot_path_rebuilds_god_view() {
         let detail = archived(6);
@@ -305,7 +179,7 @@ mod tests {
             assert_eq!(m.board.len(), 32, "4x8 共 32 格");
             assert_eq!(m.revealed_at.len(), 32);
             assert_eq!(m.board_source, SOURCE_SNAPSHOT);
-            assert_eq!(m.kind, step_kind(&detail.moves[i]));
+            assert_eq!(m.kind, kind_str(&detail.moves[i]));
         }
 
         assert_eq!(resp.final_board.len(), 32);
@@ -371,5 +245,25 @@ mod tests {
             s.core.history.records().len(),
             "快照与步记录应一一对应（含悔棋路径）"
         );
+    }
+
+    #[test]
+    fn dto_mapping_matches_neutral_output() {
+        let detail = archived(5);
+        let variant = bqsrv_config::parse_variant(&detail.summary.variant).unwrap();
+        let input = to_replay_input(variant, &detail);
+        let game = bq_replay::build_replay(&input).expect("共享库回放应成功");
+        let resp = to_replay_resp(&detail, game.clone());
+        assert_eq!(resp.board_source, game.board_source);
+        assert_eq!(resp.initial_scores, game.initial_scores);
+        for (i, (dto, neutral)) in resp.moves.iter().zip(&game.moves).enumerate() {
+            assert_eq!(dto.ply, neutral.ply);
+            assert_eq!(dto.board, neutral.board);
+            assert_eq!(dto.move_counter, neutral.move_counter);
+            assert_eq!(
+                serde_json::to_value(&dto.stats).unwrap(),
+                serde_json::to_value(detail.step_stats.get(i).cloned().flatten()).unwrap()
+            );
+        }
     }
 }

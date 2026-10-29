@@ -8,6 +8,7 @@ description = "Banqi 对弈服务应用层：对局会话与状态、模型推�
 bqsrv-config = { workspace = true }
 bqsrv-dto = { workspace = true }
 banqi-core = { workspace = true }
+bq-replay = { workspace = true }
 banqi-engine = { workspace = true }
 bq-util = { workspace = true, features = ["tokio"] }
 tokio = { workspace = true }
