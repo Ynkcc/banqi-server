@@ -1,6 +1,17 @@
-use banqi_core::core::env::MoveHistory;
 use banqi_core::core::env::types::{Piece, Player};
+use banqi_core::core::env::MoveHistory;
 pub use bqsrv_dto::player_label;
+
+pub async fn blocking<T, F>(f: F) -> Result<T, bqsrv_dto::ApiError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| bqsrv_dto::ApiError::Internal(format!("blocking 任务 join 失败: {e}")))?
+        .map_err(bqsrv_dto::ApiError::Internal)
+}
 #[derive(Debug, Clone)]
 pub struct HistoryEntry {
     pub ply: usize,

@@ -12,19 +12,8 @@ fn client_to_sq(x: i64, y: i64) -> Option<usize> {
 }
 
 fn piece_from_code(code: i64) -> Option<Piece> {
-    if !(0..14).contains(&code) {
-        return None;
-    }
-    let piece_type = match code % 7 {
-        0 => PieceType::Soldier,
-        1 => PieceType::Cannon,
-        2 => PieceType::Horse,
-        3 => PieceType::Chariot,
-        4 => PieceType::Elephant,
-        5 => PieceType::Advisor,
-        _ => PieceType::General,
-    };
-    let player = if code < 7 { Player::Red } else { Player::Black };
+    let (player, piece_type) =
+        banqi_core::core::env::piece_from_code(u8::try_from(code).ok()?)?;
     Some(Piece::new(piece_type, player))
 }
 
@@ -262,12 +251,7 @@ pub fn replay_frames(
             Slot::Empty => "空".into(),
             Slot::Hidden => "暗".into(),
             Slot::Revealed(p) => {
-                let code = if p.player == Player::Red {
-                    p.piece_type as usize
-                } else {
-                    p.piece_type as usize + 7
-                };
-                format!("子{code}")
+                format!("子{}", banqi_core::core::env::piece_code(p.player, p.piece_type))
             }
         };
         let detail = post
@@ -359,7 +343,7 @@ mod tests {
             let action = legal[(next() % legal.len() as u64) as usize];
             let cfg = env.config;
             let lookup = action_lookup_tables(&cfg);
-            let (from, to) = if action < cfg.reveal_actions_count {
+            let (from, to) = if crate::app::envops::is_flip_action(Variant::DarkChess4x8, action) {
                 let sq = lookup.action_to_coords[action][0];
                 (sq, sq)
             } else {
@@ -374,22 +358,8 @@ mod tests {
             if is_chance {
                 chosen = env.to_snapshot().hidden_bag.first().copied();
             }
-            let code = chosen.map(|p| {
-                let base = match p.piece_type {
-                    PieceType::Soldier => 0,
-                    PieceType::Cannon => 1,
-                    PieceType::Horse => 2,
-                    PieceType::Chariot => 3,
-                    PieceType::Elephant => 4,
-                    PieceType::Advisor => 5,
-                    PieceType::General => 6,
-                };
-                if p.player == Player::Red {
-                    base
-                } else {
-                    base + 7
-                }
-            });
+            let code =
+                chosen.map(|p| banqi_core::core::env::piece_code(p.player, p.piece_type) as i64);
             let res = env.step(action, chosen);
             if res.is_err() {
                 break;
@@ -402,20 +372,7 @@ mod tests {
                     Slot::Hidden => 30,
                     Slot::Empty => -1,
                     Slot::Revealed(p) => {
-                        let base = match p.piece_type {
-                            PieceType::Soldier => 0,
-                            PieceType::Cannon => 1,
-                            PieceType::Horse => 2,
-                            PieceType::Chariot => 3,
-                            PieceType::Elephant => 4,
-                            PieceType::Advisor => 5,
-                            PieceType::General => 6,
-                        };
-                        if p.player == Player::Red {
-                            base
-                        } else {
-                            base + 7
-                        }
+                        banqi_core::core::env::piece_code(p.player, p.piece_type) as i64
                     }
                 };
             }
@@ -430,7 +387,7 @@ mod tests {
                     }
                 })
                 .unwrap_or(-1);
-            if action < cfg.reveal_actions_count {
+            if crate::app::envops::is_flip_action(Variant::DarkChess4x8, action) {
                 frames.push(json!({
                     "k": "mv", "cmd": 1, "seq": step + 1,
                     "from": { "x": fx, "y": fy }, "to": { "x": fx, "y": fy },

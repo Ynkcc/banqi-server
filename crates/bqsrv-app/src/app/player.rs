@@ -1,9 +1,9 @@
-use crate::app::mcts_view::{MctsTree, MctsTreeBox, mcts_stats_from_session};
+use crate::app::mcts_view::{mcts_stats_from_session, MctsTree, MctsTreeBox};
 use crate::app::models::{EngineKind, ModelPool};
-use bqsrv_dto::{MctsStatsDto, NnueStatsDto};
 use banqi_core::core::env::{DarkChessEnv, PositionSnapshot, SnapshotEnv};
 use banqi_core::core::expectimax::rule_eval::RuleMaterialEval;
 use banqi_engine::engine::{CaptureFirstPolicy, Policy, RandomPolicy, RevealFirstPolicy};
+use bqsrv_dto::{MctsStatsDto, NnueStatsDto};
 use std::sync::Arc;
 use uuid::Uuid;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,6 +41,16 @@ pub enum StrategyKind {
     MctsDL,
 }
 impl StrategyKind {
+    pub const KIND_CHOICES: &'static str =
+        "Random / RevealFirst / CaptureFirst / Expectimax / ExpectimaxNnue / MctsOnnx / MctsDL";
+
+    pub fn invalid_kind_msg(raw: &str) -> String {
+        format!(
+            "非法策略种类: {raw}（可选 {KIND_CHOICES}）",
+            KIND_CHOICES = Self::KIND_CHOICES
+        )
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             StrategyKind::Random => "Random",
@@ -307,6 +317,8 @@ fn mcts_branch<M>(
     let tree = search(env, sims, Some(model), prev_tree)?;
     Ok(mcts_decision(tree))
 }
+
+#[cfg_attr(not(any(feature = "onnx", feature = "torch")), allow(dead_code))]
 fn mcts_decision(tree: MctsTree<DarkChessEnv>) -> Decision {
     let action = tree.chosen_action;
     let score = {
@@ -455,8 +467,8 @@ mod tests {
     }
     #[test]
     fn expectimax_rule_stats_flow_into_archive() {
-        use bqsrv_dto::StepStatsDto;
         use crate::state::GameSession;
+        use bqsrv_dto::StepStatsDto;
         let slot = PlayerSlot::strategy(
             StrategyKind::Expectimax,
             None,
@@ -469,7 +481,10 @@ mod tests {
                 ..EngineParams::default()
             },
         );
-        let mut s = GameSession::new(Variant::DarkChess4x8, Slots::new(slot.clone(), PlayerSlot::Human));
+        let mut s = GameSession::new(
+            Variant::DarkChess4x8,
+            Slots::new(slot.clone(), PlayerSlot::Human),
+        );
 
         let snap = s.core.current.clone();
         let d = decide(&snap, &slot, None, &dummy_pool()).expect("搜索应成功");

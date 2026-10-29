@@ -1,5 +1,6 @@
 use banqi_core::core::env::Variant;
 use banqi_core::core::expectimax::SearchConfig;
+use bq_inference::DEFAULT_NN_CACHE_ENTRIES;
 use std::path::PathBuf;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BudgetMode {
@@ -143,7 +144,7 @@ impl Default for ServerConfig {
             device: "cpu".to_string(),
             default_sims: 200,
             default_variant: None,
-            nn_cache_entries: 200_000,
+            nn_cache_entries: DEFAULT_NN_CACHE_ENTRIES,
             default_engine_budget: 300_000,
             default_nnue: SearchBudget::default(),
             recent_games: 20,
@@ -190,9 +191,7 @@ impl ServerConfig {
                 }
                 "--nnue-mode" => {
                     self.default_nnue.mode = BudgetMode::parse(&value).ok_or_else(|| {
-                        format!(
-                            "--nnue-mode 未知模式: {value}（可选 nodes / depth_nodes / time）"
-                        )
+                        format!("--nnue-mode 未知模式: {value}（可选 nodes / depth_nodes / time）")
                     })?
                 }
                 "--nnue-depth" => {
@@ -286,10 +285,7 @@ impl ServerConfig {
     }
 }
 pub fn parse_variant(s: &str) -> Option<Variant> {
-    Variant::ALL
-        .iter()
-        .copied()
-        .find(|v| v.as_str().eq_ignore_ascii_case(s))
+    s.parse().ok()
 }
 #[cfg(test)]
 mod tests {

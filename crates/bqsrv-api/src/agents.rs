@@ -26,12 +26,8 @@ pub async fn create_agent(
             "Agent 不能为 Human（Human 由对局槽位直接表达）".into(),
         ));
     }
-    let kind = StrategyKind::parse(&req.kind).ok_or_else(|| {
-        ApiError::BadRequest(format!(
-            "非法策略种类: {}（可选 Random / RevealFirst / CaptureFirst / Expectimax / ExpectimaxNnue / MctsOnnx / MctsDL）",
-            req.kind
-        ))
-    })?;
+    let kind = StrategyKind::parse(&req.kind)
+        .ok_or_else(|| ApiError::BadRequest(StrategyKind::invalid_kind_msg(&req.kind)))?;
     let params = app.slot_params(req.params.as_ref())?;
     let model_file = if kind.needs_model() {
         let f = app.resolve_model_file(req.model_file.as_deref(), variant)?;

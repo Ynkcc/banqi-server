@@ -87,12 +87,10 @@ pub async fn search(
         (s.core.current.clone(), slot, prev_tree, s.core.version)
     };
     let app2 = std::sync::Arc::clone(&app);
-    let decision = tokio::task::spawn_blocking(move || {
+    let decision = bqsrv_app::app::common::blocking(move || {
         bqsrv_app::app::player::decide(&snap, &slot, prev_tree, &app2.models)
     })
-    .await
-    .map_err(|e| ApiError::Internal(format!("blocking 任务 join 失败: {e}")))?
-    .map_err(ApiError::Internal)?;
+    .await?;
     let tree = decision.mcts_tree.ok_or_else(|| {
         ApiError::BadRequest("所选模型不产生 MCTS 搜索树（.nnue 为 Expectimax 叶评估后端，请用 POST /api/games/:id/nnue/search）".into())
     })?;

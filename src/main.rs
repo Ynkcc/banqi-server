@@ -37,21 +37,6 @@ async fn main() {
         .expect("HTTP 服务异常退出");
 }
 async fn shutdown_signal() {
-    let ctrl_c = async {
-        tokio::signal::ctrl_c().await.expect("注册 Ctrl-C 处理失败");
-    };
-    #[cfg(unix)]
-    let terminate = async {
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("注册 SIGTERM 处理失败")
-            .recv()
-            .await;
-    };
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-    tokio::select! {
-        _ = ctrl_c => {},
-        _ = terminate => {},
-    }
+    bqsrv_app::shutdown_signal().await;
     tracing::info!("收到退出信号，正在关闭…");
 }

@@ -3,7 +3,7 @@ use banqi_core::core::env::types::Piece;
 use banqi_core::core::env::{
     DarkChessEnv, GameEnv, MoveHistory, MoveRecord, PositionSnapshot, SnapshotEnv, Variant,
 };
-pub use bqsrv_dto::SessionError;
+use bqsrv_dto::ApiError;
 #[derive(Debug, Clone)]
 pub struct SnapshotSession {
     pub variant: Variant,
@@ -18,7 +18,7 @@ impl SnapshotSession {
     pub fn new_with_scenario(
         variant: Variant,
         scenario: Option<&banqi_core::core::env::OpeningScenario>,
-    ) -> Result<Self, SessionError> {
+    ) -> Result<Self, ApiError> {
         let snap = envops::initial_snapshot_with_scenario(variant, scenario)?;
         Ok(Self::from_snapshot(variant, snap))
     }
@@ -51,9 +51,9 @@ impl SnapshotSession {
     pub fn action_coords(&self, action: usize) -> Option<Vec<usize>> {
         envops::coords_for_action(self.variant, action)
     }
-    pub fn apply_action(&mut self, action: usize) -> Result<StepOutcome, SessionError> {
+    pub fn apply_action(&mut self, action: usize) -> Result<StepOutcome, ApiError> {
         if self.is_over() {
-            return Err(SessionError::GameOver);
+            return Err(ApiError::GameOver);
         }
 
         let prev = self.current.clone();
@@ -73,7 +73,7 @@ impl SnapshotSession {
             }
             Err(e) => {
                 self.history.pop();
-                Err(SessionError::from(e))
+                Err(ApiError::from(e))
             }
         }
     }
@@ -82,13 +82,13 @@ impl SnapshotSession {
         &mut self,
         action: usize,
         reveal: Option<Piece>,
-    ) -> Result<StepOutcome, SessionError> {
+    ) -> Result<StepOutcome, ApiError> {
         if self.is_over() {
-            return Err(SessionError::GameOver);
+            return Err(ApiError::GameOver);
         }
         let prev = self.current.clone();
         let mut env = <DarkChessEnv as SnapshotEnv>::from_snapshot(&prev)
-            .map_err(|e| SessionError::Internal(format!("重建环境失败: {e}")))?;
+            .map_err(|e| ApiError::Internal(format!("重建环境失败: {e}")))?;
         let is_chance = GameEnv::is_chance_action(&env, action);
 
         let reveal = if is_chance { reveal } else { None };
@@ -100,7 +100,7 @@ impl SnapshotSession {
                 truncated,
                 winner,
             })
-            .map_err(SessionError::from);
+            .map_err(ApiError::from);
         match step_res {
             Ok(outcome) => {
                 let post = env.to_snapshot();
@@ -117,15 +117,15 @@ impl SnapshotSession {
             }
         }
     }
-    pub fn undo_steps(&mut self, steps: usize) -> Result<(), SessionError> {
+    pub fn undo_steps(&mut self, steps: usize) -> Result<(), ApiError> {
         if self.is_over() {
-            return Err(SessionError::GameOver);
+            return Err(ApiError::GameOver);
         }
         if steps == 0 {
-            return Err(SessionError::BadRequest("steps 必须至少为 1".to_string()));
+            return Err(ApiError::BadRequest("steps 必须至少为 1".to_string()));
         }
         let snap = self.history.undo_steps(steps).ok_or_else(|| {
-            SessionError::BadRequest(format!(
+            ApiError::BadRequest(format!(
                 "可回退步数不足: 请求 {steps}，当前仅 {} 步历史",
                 self.history.len()
             ))
@@ -134,13 +134,13 @@ impl SnapshotSession {
         self.version += 1;
         Ok(())
     }
-    pub fn undo_to_current_player(&mut self) -> Result<(), SessionError> {
+    pub fn undo_to_current_player(&mut self) -> Result<(), ApiError> {
         if self.is_over() {
-            return Err(SessionError::GameOver);
+            return Err(ApiError::GameOver);
         }
         let target = self.current.current_player;
         let snap = self.history.undo_to_player_turn(target).ok_or_else(|| {
-            SessionError::BadRequest("没有可悔的棋步（当前玩家尚未行动过）".to_string())
+            ApiError::BadRequest("没有可悔的棋步（当前玩家尚未行动过）".to_string())
         })?;
         self.current = snap;
         self.version += 1;
@@ -187,7 +187,7 @@ mod tests {
         let _ = action;
         assert!(matches!(
             s.apply_action(illegal),
-            Err(SessionError::IllegalAction { .. })
+            Err(ApiError::IllegalAction { .. })
         ));
         assert_eq!(s.current, before, "非法动作不得修改局面");
         assert_eq!(s.version, 0);
@@ -250,6 +250,6 @@ mod tests {
             Some(&OpeningScenario::new(5)),
         )
         .expect_err("不支持的变体应报错");
-        assert!(matches!(err, SessionError::BadRequest(_)));
+        assert!(matches!(err, ApiError::BadRequest(_)));
     }
 }

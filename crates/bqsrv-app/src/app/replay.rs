@@ -53,7 +53,7 @@ pub fn build_replay(detail: &ArchivedGameDetail) -> Result<ReplayResp, String> {
             v[i].clone()
         } else {
             PositionSnapshot::from_fen(detail.initial_fen.trim())
-                .unwrap_or_else(|_| variant_initial_snapshot(variant))
+                .unwrap_or_else(|_| crate::app::envops::initial_snapshot(variant))
         }
     };
 
@@ -125,7 +125,7 @@ pub fn snapshot_at_ply(
         return Ok(final_snapshot(
             detail,
             &PositionSnapshot::from_fen(detail.initial_fen.trim())
-                .unwrap_or_else(|_| variant_initial_snapshot(variant)),
+                .unwrap_or_else(|_| crate::app::envops::initial_snapshot(variant)),
         ));
     }
 
@@ -190,12 +190,6 @@ fn final_snapshot(detail: &ArchivedGameDetail, fallback: &PositionSnapshot) -> P
         return snap;
     }
     PositionSnapshot::from_fen(detail.final_fen.trim()).unwrap_or_else(|_| fallback.clone())
-}
-
-fn variant_initial_snapshot(variant: Variant) -> PositionSnapshot {
-    banqi_core::for_variant_env!(variant, E => {
-        <E as Default>::default().to_snapshot()
-    })
 }
 
 fn step_kind(m: &HistoryMoveView) -> &'static str {

@@ -1,8 +1,7 @@
 use crate::app::common::player_label;
-use banqi_core::core::env::actions::action_lookup_tables;
 use banqi_core::core::env::{GameEnv, SnapshotEnv};
 use banqi_core::core::mcts::MctsArena;
-pub use banqi_engine::engine::gumbel::{MctsSearchStats, MctsTree, tree_stats};
+pub use banqi_engine::engine::gumbel::{MctsSearchStats, MctsTree};
 use serde::Serialize;
 #[derive(Debug, Clone, Serialize)]
 pub struct MctsEdge {
@@ -173,12 +172,7 @@ impl<G: GameEnv + SnapshotEnv + 'static> MctsTreeView for MctsTree<G> {
         let action = action.map(|a| a as usize);
         let snap = env.to_snapshot();
         let move_coords = action
-            .and_then(|a| {
-                action_lookup_tables(&snap.variant.config())
-                    .action_to_coords
-                    .get(a)
-                    .cloned()
-            })
+            .and_then(|a| crate::app::envops::coords_for_action(snap.variant, a))
             .unwrap_or_default();
         let state = crate::app::view::game_state_view(&snap);
         Some(MctsNodeBoard { state, move_coords })

@@ -1,6 +1,5 @@
 use crate::app::common::player_label;
 use crate::app::search::NnueSearchStats;
-use banqi_core::core::env::actions::action_lookup_tables;
 use banqi_core::core::env::{DarkChessEnv, SnapshotEnv};
 use banqi_core::core::expectimax::{BoundFlag, ExNode, ExTree};
 use serde::Serialize;
@@ -114,12 +113,7 @@ pub fn ex_node_board(tree: &ExTree, node_id: usize) -> Option<ExNodeBoard> {
     let snap = env.to_snapshot();
     let move_coords = (snap.last_action >= 0)
         .then_some(snap.last_action as usize)
-        .and_then(|a| {
-            action_lookup_tables(&snap.variant.config())
-                .action_to_coords
-                .get(a)
-                .cloned()
-        })
+        .and_then(|a| crate::app::envops::coords_for_action(snap.variant, a))
         .unwrap_or_default();
     let state = crate::app::view::game_state_view(&snap);
     Some(ExNodeBoard { state, move_coords })

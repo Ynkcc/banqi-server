@@ -5,25 +5,20 @@ use crate::app::player::{Agent, EngineParams, PlayerSlot, Slots, StrategyKind};
 use crate::app::search::{BudgetMode, SearchBudget};
 use crate::app::session::SnapshotSession;
 use crate::app::sync::{lock, read_lock, write_lock};
-use bqsrv_config::ServerConfig;
-use bqsrv_dto::{
-    ActionView, ArchivedGameDetail, GameStateResp, HistoryMoveView, SlotView, SlotsView, winner_str,
-};
-use bqsrv_dto::ApiError;
 use banqi_core::core::env::DarkChessEnv;
 use banqi_core::core::env::{PositionSnapshot, Variant};
 use banqi_engine::nnue::NnueEvaluator;
+use bqsrv_config::ServerConfig;
+use bqsrv_dto::ApiError;
+use bqsrv_dto::{
+    winner_str, ActionView, ArchivedGameDetail, GameStateResp, HistoryMoveView, SlotView, SlotsView,
+};
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 use uuid::Uuid;
 pub type Models = crate::app::models::ModelPool;
-pub fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
+pub use bq_util::unix_now;
 pub struct GameSession {
     pub core: SnapshotSession,
     pub slots: Slots,
@@ -96,7 +91,7 @@ impl GameSession {
         self.core.over_state()
     }
     pub fn apply_action(&mut self, action: usize) -> Result<StepOutcome, ApiError> {
-        self.core.apply_action(action).map_err(ApiError::from)
+        self.core.apply_action(action)
     }
 
     pub fn apply_action_with_reveal(
@@ -105,22 +100,19 @@ impl GameSession {
         reveal: Option<banqi_core::core::env::types::Piece>,
         mover: Option<String>,
     ) -> Result<StepOutcome, ApiError> {
-        let outcome = self
-            .core
-            .apply_action_with_reveal(action, reveal)
-            .map_err(ApiError::from)?;
+        let outcome = self.core.apply_action_with_reveal(action, reveal)?;
         self.movers.truncate(self.core.history.records().len());
         self.movers.push(mover);
         Ok(outcome)
     }
     pub fn undo(&mut self, steps: usize) -> Result<(), ApiError> {
-        self.core.undo_steps(steps).map_err(ApiError::from)?;
+        self.core.undo_steps(steps)?;
         self.step_stats.truncate(self.core.history.records().len());
         self.movers.truncate(self.core.history.records().len());
         Ok(())
     }
     pub fn undo_to_current_player(&mut self) -> Result<(), ApiError> {
-        self.core.undo_to_current_player().map_err(ApiError::from)?;
+        self.core.undo_to_current_player()?;
         self.step_stats.truncate(self.core.history.records().len());
         self.movers.truncate(self.core.history.records().len());
         Ok(())
@@ -490,15 +482,10 @@ impl AppState {
             return;
         };
         let write = || -> std::io::Result<()> {
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::write(
-                &path,
-                serde_json::to_string_pretty(detail).map_err(|e| {
-                    std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
-                })?,
-            )
+            let data = serde_json::to_string_pretty(detail)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+
+            bq_util::atomic_write(&path, data.as_bytes())
         };
         if let Err(e) = write() {
             tracing::warn!(archive = %detail.summary.game_id, "归档落盘失败（仅保留内存归档）: {e}");
@@ -521,19 +508,10 @@ impl AppState {
         if self.config.recent_games == 0 {
             return;
         }
-        let mut details: Vec<ArchivedGameDetail> = match std::fs::read_dir(dir) {
-            Ok(entries) => entries
-                .filter_map(|e| e.ok())
-                .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
-                .filter_map(|e| std::fs::read_to_string(e.path()).ok())
-                .filter_map(|text| serde_json::from_str(&text).ok())
-                .collect(),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-            Err(e) => {
-                tracing::warn!("读取归档目录 {dir:?} 失败: {e}");
-                return;
-            }
-        };
+        let mut details: Vec<ArchivedGameDetail> = bq_util::load_json_dir(dir, "json")
+            .into_iter()
+            .map(|(_, detail)| detail)
+            .collect();
         details.sort_by(|a, b| b.summary.finished_at.cmp(&a.summary.finished_at));
         details.truncate(self.config.recent_games);
         let count = details.len();
@@ -662,18 +640,18 @@ impl AppState {
             return Ok(d);
         };
         let nnue_budget = self.build_search_budget(
-            p.nnue_budget_mode.as_deref(),
-            p.nnue_budget,
-            p.nnue_depth,
-            p.nnue_time_ms,
-            p.search_timeout_ms,
+            p.budget.nnue_budget_mode.as_deref(),
+            p.budget.nnue_budget,
+            p.budget.nnue_depth,
+            p.budget.nnue_time_ms,
+            p.budget.search_timeout_ms,
         )?;
         let engine_budget = self.build_engine_budget(
-            p.engine_budget_mode.as_deref(),
-            p.engine_budget,
-            p.engine_depth,
-            p.engine_time_ms,
-            p.search_timeout_ms,
+            p.budget.engine_budget_mode.as_deref(),
+            p.budget.engine_budget,
+            p.budget.engine_depth,
+            p.budget.engine_time_ms,
+            p.budget.search_timeout_ms,
         )?;
         Ok(EngineParams {
             mcts_sims: p.mcts_sims.unwrap_or(d.mcts_sims).max(1),

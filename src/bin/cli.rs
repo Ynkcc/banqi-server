@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use serde_json::{Value, json};
 use std::process::ExitCode;
 #[derive(Parser)]
@@ -39,20 +39,8 @@ enum Cmd {
         model_file: Option<String>,
         #[arg(long)]
         fen: Option<String>,
-        #[arg(long)]
-        mcts_sims: Option<usize>,
-        #[arg(long)]
-        engine_budget: Option<u64>,
-        #[arg(long)]
-        nnue_mode: Option<String>,
-        #[arg(long)]
-        nnue_depth: Option<i32>,
-        #[arg(long)]
-        nnue_budget: Option<u64>,
-        #[arg(long)]
-        nnue_time_ms: Option<u64>,
-        #[arg(long)]
-        search_timeout_ms: Option<u64>,
+        #[command(flatten)]
+        budget: BudgetOpts,
     },
     Show {
         id: String,
@@ -91,18 +79,8 @@ enum Cmd {
         fen: String,
         #[arg(long, alias = "model")]
         model_file: Option<String>,
-        #[arg(long)]
-        mcts_sims: Option<usize>,
-        #[arg(long)]
-        nnue_mode: Option<String>,
-        #[arg(long)]
-        nnue_depth: Option<i32>,
-        #[arg(long)]
-        nnue_budget: Option<u64>,
-        #[arg(long)]
-        nnue_time_ms: Option<u64>,
-        #[arg(long)]
-        search_timeout_ms: Option<u64>,
+        #[command(flatten)]
+        budget: BudgetOpts,
     },
     Mcts {
         #[command(subcommand)]
@@ -113,20 +91,8 @@ enum Cmd {
 enum SettingsCmd {
     Get,
     Set {
-        #[arg(long)]
-        mcts_sims: Option<usize>,
-        #[arg(long)]
-        engine_budget: Option<u64>,
-        #[arg(long)]
-        nnue_mode: Option<String>,
-        #[arg(long)]
-        nnue_depth: Option<i32>,
-        #[arg(long)]
-        nnue_budget: Option<u64>,
-        #[arg(long)]
-        nnue_time_ms: Option<u64>,
-        #[arg(long)]
-        search_timeout_ms: Option<u64>,
+        #[command(flatten)]
+        budget: BudgetOpts,
     },
 }
 #[derive(Subcommand)]
@@ -136,6 +102,42 @@ enum MctsCmd {
     Node { id: String, node: usize },
     Children { id: String, node: usize },
     Board { id: String, node: usize },
+}
+macro_rules! set_opt {
+    ($obj:expr, $key:literal, $field:expr) => {
+        if let Some(v) = $field {
+            $obj[$key] = json!(v);
+        }
+    };
+}
+
+#[derive(Args, Default)]
+struct BudgetOpts {
+    #[arg(long)]
+    mcts_sims: Option<usize>,
+    #[arg(long)]
+    engine_budget: Option<u64>,
+    #[arg(long)]
+    nnue_mode: Option<String>,
+    #[arg(long)]
+    nnue_depth: Option<i32>,
+    #[arg(long)]
+    nnue_budget: Option<u64>,
+    #[arg(long)]
+    nnue_time_ms: Option<u64>,
+    #[arg(long)]
+    search_timeout_ms: Option<u64>,
+}
+impl BudgetOpts {
+    fn apply(&self, obj: &mut Value) {
+        set_opt!(obj, "mctsSims", self.mcts_sims);
+        set_opt!(obj, "engineBudget", self.engine_budget);
+        set_opt!(obj, "nnueBudgetMode", &self.nnue_mode);
+        set_opt!(obj, "nnueDepth", self.nnue_depth);
+        set_opt!(obj, "nnueBudget", self.nnue_budget);
+        set_opt!(obj, "nnueTimeMs", self.nnue_time_ms);
+        set_opt!(obj, "searchTimeoutMs", self.search_timeout_ms);
+    }
 }
 struct Client {
     base: String,
@@ -202,25 +204,7 @@ impl Client {
             .ok_or_else(|| "内部错误：服务器对 PUT 请求返回 204".to_string())
     }
 }
-macro_rules! set_opt {
-    ($obj:expr, $key:literal, $field:expr) => {
-        if let Some(v) = $field {
-            $obj[$key] = json!(v);
-        }
-    };
-}
-#[allow(clippy::too_many_arguments)]
-fn slot_body(
-    kind: &Option<String>,
-    model_file: &Option<String>,
-    mcts_sims: &Option<usize>,
-    engine_budget: &Option<u64>,
-    nnue_mode: &Option<String>,
-    nnue_depth: &Option<i32>,
-    nnue_budget: &Option<u64>,
-    nnue_time_ms: &Option<u64>,
-    search_timeout_ms: &Option<u64>,
-) -> Value {
+fn slot_body(kind: &Option<String>, model_file: &Option<String>, budget: &BudgetOpts) -> Value {
     let Some(kind) = kind.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
         return json!({ "kind": "Human" });
     };
@@ -230,31 +214,18 @@ fn slot_body(
             s["modelFile"] = json!(m);
         }
         let mut p = json!({});
-        set_opt!(p, "mctsSims", mcts_sims);
-        set_opt!(p, "engineBudget", engine_budget);
-        set_opt!(p, "nnueBudgetMode", nnue_mode);
-        set_opt!(p, "nnueDepth", nnue_depth);
-        set_opt!(p, "nnueBudget", nnue_budget);
-        set_opt!(p, "nnueTimeMs", nnue_time_ms);
-        set_opt!(p, "searchTimeoutMs", search_timeout_ms);
+        budget.apply(&mut p);
         if p.as_object().is_some_and(|o| !o.is_empty()) {
             s["params"] = p;
         }
     }
     s
 }
-#[allow(clippy::too_many_arguments)]
 fn slots_body(
     red: &Option<String>,
     black: &Option<String>,
     model_file: &Option<String>,
-    mcts_sims: &Option<usize>,
-    engine_budget: &Option<u64>,
-    nnue_mode: &Option<String>,
-    nnue_depth: &Option<i32>,
-    nnue_budget: &Option<u64>,
-    nnue_time_ms: &Option<u64>,
-    search_timeout_ms: &Option<u64>,
+    budget: &BudgetOpts,
 ) -> Value {
     let mut b = json!({});
     let red_slot = red.as_deref().map(str::trim).filter(|s| !s.is_empty());
@@ -262,30 +233,10 @@ fn slots_body(
     if red_slot.is_some() || black_slot.is_some() {
         b["slots"] = json!({});
         if let Some(red) = red_slot {
-            b["slots"]["red"] = slot_body(
-                &Some(red.to_string()),
-                model_file,
-                mcts_sims,
-                engine_budget,
-                nnue_mode,
-                nnue_depth,
-                nnue_budget,
-                nnue_time_ms,
-                search_timeout_ms,
-            );
+            b["slots"]["red"] = slot_body(&Some(red.to_string()), model_file, budget);
         }
         if let Some(black) = black_slot {
-            b["slots"]["black"] = slot_body(
-                &Some(black.to_string()),
-                model_file,
-                mcts_sims,
-                engine_budget,
-                nnue_mode,
-                nnue_depth,
-                nnue_budget,
-                nnue_time_ms,
-                search_timeout_ms,
-            );
+            b["slots"]["black"] = slot_body(&Some(black.to_string()), model_file, budget);
         }
     }
     b
@@ -359,23 +310,9 @@ fn run(base_url: &str, cmd: Cmd) -> Result<Option<String>, String> {
         Cmd::Games => print(cli.get("/api/games")?),
         Cmd::Settings { cmd } => match cmd {
             SettingsCmd::Get => print(cli.get("/api/settings")?),
-            SettingsCmd::Set {
-                mcts_sims,
-                engine_budget,
-                nnue_mode,
-                nnue_depth,
-                nnue_budget,
-                nnue_time_ms,
-                search_timeout_ms,
-            } => {
+            SettingsCmd::Set { budget } => {
                 let mut b = json!({});
-                set_opt!(b, "mctsSims", mcts_sims);
-                set_opt!(b, "engineBudget", engine_budget);
-                set_opt!(b, "nnueBudgetMode", nnue_mode);
-                set_opt!(b, "nnueDepth", nnue_depth);
-                set_opt!(b, "nnueBudget", nnue_budget);
-                set_opt!(b, "nnueTimeMs", nnue_time_ms);
-                set_opt!(b, "searchTimeoutMs", search_timeout_ms);
+                budget.apply(&mut b);
                 print(cli.put("/api/settings", b)?)
             }
         },
@@ -385,26 +322,9 @@ fn run(base_url: &str, cmd: Cmd) -> Result<Option<String>, String> {
             black,
             model_file,
             fen,
-            mcts_sims,
-            engine_budget,
-            nnue_mode,
-            nnue_depth,
-            nnue_budget,
-            nnue_time_ms,
-            search_timeout_ms,
+            budget,
         } => {
-            let mut body = slots_body(
-                &red,
-                &black,
-                &model_file,
-                &mcts_sims,
-                &engine_budget,
-                &nnue_mode,
-                &nnue_depth,
-                &nnue_budget,
-                &nnue_time_ms,
-                &search_timeout_ms,
-            );
+            let mut body = slots_body(&red, &black, &model_file, &budget);
             set_opt!(body, "variant", variant);
             set_opt!(body, "fen", fen);
             print(cli.post("/api/games", Some(body))?)
@@ -442,18 +362,7 @@ fn run(base_url: &str, cmd: Cmd) -> Result<Option<String>, String> {
             model_file,
         } => print(cli.put(
             &format!("/api/games/{id}/slots"),
-            slots_body(
-                &red,
-                &black,
-                &model_file,
-                &None,
-                &None,
-                &None,
-                &None,
-                &None,
-                &None,
-                &None,
-            ),
+            slots_body(&red, &black, &model_file, &BudgetOpts::default()),
         )?),
         Cmd::Delete { id } => {
             cli.send("DELETE", &format!("/api/games/{id}"), None)?;
@@ -463,21 +372,11 @@ fn run(base_url: &str, cmd: Cmd) -> Result<Option<String>, String> {
         Cmd::Engine {
             fen,
             model_file,
-            mcts_sims,
-            nnue_mode,
-            nnue_depth,
-            nnue_budget,
-            nnue_time_ms,
-            search_timeout_ms,
+            budget,
         } => {
             let mut b = json!({ "fen": fen });
             set_opt!(b, "modelFile", model_file);
-            set_opt!(b, "mctsSims", mcts_sims);
-            set_opt!(b, "nnueBudgetMode", nnue_mode);
-            set_opt!(b, "nnueDepth", nnue_depth);
-            set_opt!(b, "nnueBudget", nnue_budget);
-            set_opt!(b, "nnueTimeMs", nnue_time_ms);
-            set_opt!(b, "searchTimeoutMs", search_timeout_ms);
+            budget.apply(&mut b);
             print(cli.post("/api/engine/move", Some(b))?)
         }
         Cmd::Mcts { cmd } => match cmd {

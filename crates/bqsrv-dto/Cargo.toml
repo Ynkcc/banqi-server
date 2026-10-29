@@ -8,6 +8,7 @@ description = "Banqi 对弈服务 API 契约层：请求/响应结构、错误�
 bqsrv-config = { workspace = true }
 banqi-core = { workspace = true }
 banqi-engine = { workspace = true }
+bq-util = { workspace = true }
 axum = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

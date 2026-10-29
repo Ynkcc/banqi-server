@@ -34,8 +34,9 @@ async fn build_slot(
     }
     let kind = StrategyKind::parse(&req.kind).ok_or_else(|| {
         ApiError::BadRequest(format!(
-            "非法策略种类: {}（可选 Human / Random / RevealFirst / CaptureFirst / Expectimax / ExpectimaxNnue / MctsOnnx / MctsDL / Agent）",
-            req.kind
+            "非法策略种类: {}（可选 Human / {} / Agent）",
+            req.kind,
+            StrategyKind::KIND_CHOICES
         ))
     })?;
     let params = app.slot_params(req.params.as_ref())?;

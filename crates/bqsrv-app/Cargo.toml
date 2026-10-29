@@ -9,6 +9,7 @@ bqsrv-config = { workspace = true }
 bqsrv-dto = { workspace = true }
 banqi-core = { workspace = true }
 banqi-engine = { workspace = true }
+bq-util = { workspace = true, features = ["tokio"] }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

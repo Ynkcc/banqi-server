@@ -1,7 +1,9 @@
 use crate::app::sync::lock;
 use banqi_core::core::env::config::GameConfig;
+use banqi_engine::inference::ModelCache;
+#[cfg(feature = "onnx")]
+use banqi_engine::inference::OnnxModelCache;
 use banqi_engine::nnue::NnueEvaluator;
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 pub fn scan_model_files(dir: &Path, extensions: &[&str], max_depth: usize) -> Vec<PathBuf> {
@@ -53,13 +55,12 @@ pub enum EngineKind {
 }
 impl EngineKind {
     pub fn from_model_file(file: &str) -> Self {
-        let lower = file.to_ascii_lowercase();
-        if lower.ends_with(".nnue") {
-            Self::Nnue
-        } else if lower.ends_with(".pt") {
-            Self::MctsDL
-        } else {
-            Self::MctsOnnx
+        use banqi_engine::inference::ModelFormat;
+        match ModelFormat::from_path(file) {
+            Some(ModelFormat::Nnue) => Self::Nnue,
+            Some(ModelFormat::Torch) => Self::MctsDL,
+
+            _ => Self::MctsOnnx,
         }
     }
     pub fn as_str(&self) -> &'static str {
@@ -77,10 +78,10 @@ pub(crate) const SCAN_EXTENSIONS: &[&str] = &["onnx", "nnue"];
 pub struct ModelPool {
     files: Mutex<Vec<String>>,
     #[cfg(feature = "onnx")]
-    loaded_onnx: Mutex<HashMap<String, Arc<banqi_engine::inference::onnx::OnnxModel>>>,
+    onnx_cache: OnnxModelCache,
     #[cfg(feature = "torch")]
-    loaded_torch: Mutex<HashMap<String, Arc<banqi_engine::engine::ModelWrapper>>>,
-    loaded_nnue: Mutex<HashMap<String, Arc<NnueEvaluator>>>,
+    loaded_torch: ModelCache<banqi_engine::engine::ModelWrapper>,
+    loaded_nnue: ModelCache<NnueEvaluator>,
     models_dir: PathBuf,
     #[cfg(feature = "onnx")]
     sessions: usize,
@@ -96,10 +97,10 @@ impl ModelPool {
         let models = Self {
             files: Mutex::new(Vec::new()),
             #[cfg(feature = "onnx")]
-            loaded_onnx: Mutex::new(HashMap::new()),
+            onnx_cache: OnnxModelCache::new(device, sessions, nn_cache_entries),
             #[cfg(feature = "torch")]
-            loaded_torch: Mutex::new(HashMap::new()),
-            loaded_nnue: Mutex::new(HashMap::new()),
+            loaded_torch: ModelCache::new(),
+            loaded_nnue: ModelCache::new(),
             models_dir: models_dir.to_path_buf(),
             #[cfg(feature = "onnx")]
             sessions,
@@ -141,30 +142,19 @@ impl ModelPool {
         &self,
         file: &str,
     ) -> Result<Arc<banqi_engine::inference::onnx::OnnxModel>, String> {
-        let mut loaded = lock(&self.loaded_onnx);
-        if let Some(m) = loaded.get(file) {
-            return Ok(Arc::clone(m));
-        }
-        tracing::info!(
-            "首次使用，加载 ONNX 模型: {file}（会话池 {}，device {}，nncache {}）",
-            self.sessions,
-            self.device,
-            if self.nn_cache_entries > 0 {
-                format!("开启（≤{} 条）", self.nn_cache_entries)
-            } else {
-                "关闭".to_string()
-            }
-        );
-        let model = Arc::new(
-            banqi_engine::inference::onnx::OnnxModel::with_sessions_cached(
-                file,
-                &self.device,
+        if self.onnx_cache.get(file).is_none() {
+            tracing::info!(
+                "首次使用，加载 ONNX 模型: {file}（会话池 {}，device {}，nncache {}）",
                 self.sessions,
-                self.nn_cache_entries,
-            )?,
-        );
-        loaded.insert(file.to_string(), Arc::clone(&model));
-        Ok(model)
+                self.device,
+                if self.nn_cache_entries > 0 {
+                    format!("开启（≤{} 条）", self.nn_cache_entries)
+                } else {
+                    "关闭".to_string()
+                }
+            );
+        }
+        self.onnx_cache.acquire(file)
     }
     #[cfg(not(feature = "onnx"))]
     #[allow(dead_code)]
@@ -176,14 +166,12 @@ impl ModelPool {
         &self,
         file: &str,
     ) -> Result<Arc<banqi_engine::engine::ModelWrapper>, String> {
-        let mut loaded = lock(&self.loaded_torch);
-        if let Some(m) = loaded.get(file) {
-            return Ok(Arc::clone(m));
-        }
-        tracing::info!("首次使用，加载 TorchScript 模型: {file}");
-        let model = Arc::new(banqi_engine::engine::ModelWrapper::load_from_file(file)?);
-        loaded.insert(file.to_string(), Arc::clone(&model));
-        Ok(model)
+        self.loaded_torch.get_or_load(file, |p| {
+            tracing::info!("首次使用，加载 TorchScript 模型: {p}");
+            Ok(Arc::new(
+                banqi_engine::engine::ModelWrapper::load_from_file(p)?,
+            ))
+        })
     }
     #[cfg(not(feature = "torch"))]
     #[allow(dead_code)]
@@ -194,14 +182,10 @@ impl ModelPool {
         )
     }
     pub fn acquire_nnue(&self, file: &str) -> Result<Arc<NnueEvaluator>, String> {
-        let mut loaded = lock(&self.loaded_nnue);
-        if let Some(e) = loaded.get(file) {
-            return Ok(Arc::clone(e));
-        }
-        tracing::info!("首次使用，加载 NNUE 模型: {file}");
-        let evaluator = Arc::new(NnueEvaluator::load_from_file(file)?);
-        loaded.insert(file.to_string(), Arc::clone(&evaluator));
-        Ok(evaluator)
+        self.loaded_nnue.get_or_load(file, |p| {
+            tracing::info!("首次使用，加载 NNUE 模型: {p}");
+            Ok(Arc::new(NnueEvaluator::load_from_file(p)?))
+        })
     }
     pub fn acquire_nnue_validated(
         &self,
@@ -217,13 +201,13 @@ impl ModelPool {
     pub fn loaded_files(&self) -> Vec<(String, bool)> {
         self.files();
         let loaded_keys: std::collections::HashSet<String> = {
-            #[cfg_attr(not(feature = "onnx"), allow(unused_mut))]
+            #[cfg_attr(not(any(feature = "onnx", feature = "torch")), allow(unused_mut))]
             let mut set: std::collections::HashSet<String> =
-                lock(&self.loaded_nnue).keys().cloned().collect();
+                self.loaded_nnue.loaded_keys().into_iter().collect();
             #[cfg(feature = "onnx")]
-            set.extend(lock(&self.loaded_onnx).keys().cloned());
+            set.extend(self.onnx_cache.loaded_keys());
             #[cfg(feature = "torch")]
-            set.extend(lock(&self.loaded_torch).keys().cloned());
+            set.extend(self.loaded_torch.loaded_keys());
             set
         };
         lock(&self.files)

@@ -202,18 +202,18 @@ async fn put_settings(
     Json(req): Json<SettingsReq>,
 ) -> Result<Json<SettingsResp>, ApiError> {
     let nnue_budget = app.build_search_budget(
-        req.nnue_budget_mode.as_deref(),
-        req.nnue_budget,
-        req.nnue_depth,
-        req.nnue_time_ms,
-        req.search_timeout_ms,
+        req.budget.nnue_budget_mode.as_deref(),
+        req.budget.nnue_budget,
+        req.budget.nnue_depth,
+        req.budget.nnue_time_ms,
+        req.budget.search_timeout_ms,
     )?;
     let engine_budget = app.build_engine_budget(
-        req.engine_budget_mode.as_deref(),
-        req.engine_budget,
-        req.engine_depth,
-        req.engine_time_ms,
-        req.search_timeout_ms,
+        req.budget.engine_budget_mode.as_deref(),
+        req.budget.engine_budget,
+        req.budget.engine_depth,
+        req.budget.engine_time_ms,
+        req.budget.search_timeout_ms,
     )?;
     let p = app.update_params(req.mcts_sims, Some(engine_budget), Some(nnue_budget));
     tracing::info!(

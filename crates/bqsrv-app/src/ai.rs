@@ -160,10 +160,8 @@ pub async fn run_strategy_turn(
     let slot = plan.slot;
     let prev_tree = plan.prev_tree;
     let decision =
-        tokio::task::spawn_blocking(move || player::decide(&snap, &slot, prev_tree, &app2.models))
-            .await
-            .map_err(|e| ApiError::Internal(format!("blocking 任务 join 失败: {e}")))?
-            .map_err(ApiError::Internal)?;
+        crate::app::common::blocking(move || player::decide(&snap, &slot, prev_tree, &app2.models))
+            .await?;
     apply_strategy_action(
         app,
         game_id,
@@ -297,15 +295,13 @@ pub async fn manual_expectimax_search(
         )
     };
     let search = |evaluator, budget, label| async move {
-        tokio::task::spawn_blocking(move || {
+        crate::app::common::blocking(move || {
             use banqi_core::core::env::SnapshotEnv;
             let env =
                 DarkChessEnv::from_snapshot(&snap).map_err(|e| format!("重建环境失败: {e}"))?;
             crate::app::search::expectimax_search_tree(&env, evaluator, budget, label)
         })
         .await
-        .map_err(|e| ApiError::Internal(format!("blocking 任务 join 失败: {e}")))?
-        .map_err(ApiError::Internal)
     };
     let kept = match eval_sel {
         EvalSel::Rule => {
@@ -360,11 +356,8 @@ pub async fn run_dry_run(
                     PlayerSlot::Human => {
                         let kind = match req.kind.as_deref() {
                             None | Some("") => StrategyKind::Expectimax,
-                            Some(k) => StrategyKind::parse(k).ok_or_else(|| {
-                                ApiError::BadRequest(format!(
-                                    "非法策略种类: {k}（可选 Random / RevealFirst / CaptureFirst / Expectimax / ExpectimaxNnue / MctsOnnx / MctsDL）"
-                                ))
-                            })?,
+                            Some(k) => StrategyKind::parse(k)
+                                .ok_or_else(|| ApiError::BadRequest(StrategyKind::invalid_kind_msg(k)))?,
                         };
                         let params = app.slot_params(req.params.as_ref())?;
                         let model_file = if kind.needs_model() {
@@ -380,16 +373,15 @@ pub async fn run_dry_run(
         (s.core.current.clone(), s.core.version, hint_slot)
     };
     let app2 = Arc::clone(app);
-    let decision =
-        tokio::task::spawn_blocking(move || player::dry_run(&snap, &hint_slot, &app2.models))
-            .await
-            .map_err(|e| ApiError::Internal(format!("blocking 任务 join 失败: {e}")))?
-            .map_err(ApiError::Internal)?;
+    let decision = crate::app::common::blocking(move || {
+        player::dry_run(&snap, &hint_slot, &app2.models)
+    })
+    .await?;
     let mut games = write_lock(&app.games);
     let s = get_mut_session(&mut games, &game_id.to_string(), game_id)?;
     let player = s.core.current.current_player;
     let view = s.action_view(decision.action);
-    let is_flip = decision.action < s.core.variant.config().reveal_actions_count;
+    let is_flip = crate::app::envops::is_flip_action(s.core.variant, decision.action);
     let is_capture = !view.is_chance
         && !is_flip
         && view.from != view.to

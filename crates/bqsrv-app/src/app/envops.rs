@@ -52,6 +52,10 @@ pub fn coords_for_action(variant: Variant, action: usize) -> Option<Vec<usize>> 
         .cloned()
 }
 
+pub fn is_flip_action(variant: Variant, action: usize) -> bool {
+    action < variant.config().reveal_actions_count
+}
+
 pub fn action_for_coords(
     variant: Variant,
     snap: &PositionSnapshot,

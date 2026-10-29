@@ -53,11 +53,11 @@ pub async fn engine_move(
     let (kind, slot) = if rule_engine {
         let budget = bqsrv_app::state::AppState::build_budget(
             app.params().engine_budget,
-            req.engine_budget_mode.as_deref(),
-            req.engine_budget,
-            req.engine_depth,
-            req.engine_time_ms,
-            req.search_timeout_ms,
+            req.budget.engine_budget_mode.as_deref(),
+            req.budget.engine_budget,
+            req.budget.engine_depth,
+            req.budget.engine_time_ms,
+            req.budget.search_timeout_ms,
         )?;
         (
             StrategyKind::Expectimax,
@@ -76,11 +76,11 @@ pub async fn engine_move(
         let slot = match kind {
             StrategyKind::ExpectimaxNnue => {
                 let budget = app.build_search_budget(
-                    req.nnue_budget_mode.as_deref(),
-                    req.nnue_budget,
-                    req.nnue_depth,
-                    req.nnue_time_ms,
-                    req.search_timeout_ms,
+                    req.budget.nnue_budget_mode.as_deref(),
+                    req.budget.nnue_budget,
+                    req.budget.nnue_depth,
+                    req.budget.nnue_time_ms,
+                    req.budget.search_timeout_ms,
                 )?;
                 PlayerSlot::strategy(
                     kind,
@@ -103,13 +103,12 @@ pub async fn engine_move(
         (kind, slot)
     };
     let app2 = Arc::clone(&app);
-    let decision =
-        tokio::task::spawn_blocking(move || player::decide(&snap, &slot, None, &app2.models))
-            .await
-            .map_err(|e| ApiError::Internal(format!("blocking 任务 join 失败: {e}")))?
-            .map_err(ApiError::Internal)?;
+    let decision = bqsrv_app::app::common::blocking(move || {
+        player::decide(&snap, &slot, None, &app2.models)
+    })
+    .await?;
     let view = session.action_view(decision.action);
-    let is_flip = decision.action < variant.config().reveal_actions_count;
+    let is_flip = bqsrv_app::app::envops::is_flip_action(variant, decision.action);
     tracing::info!(
         variant = variant.as_str(),
         kind = kind.as_str(),

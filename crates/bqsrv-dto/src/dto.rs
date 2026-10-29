@@ -34,14 +34,12 @@ pub struct SlotReq {
     #[serde(default)]
     pub label: Option<String>,
 }
+
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
-pub struct SlotParamsReq {
-    #[serde(default)]
-    pub mcts_sims: Option<usize>,
+pub struct BudgetParams {
     #[serde(default)]
     pub engine_budget: Option<u64>,
-
     #[serde(default)]
     pub engine_budget_mode: Option<String>,
     #[serde(default)]
@@ -58,6 +56,14 @@ pub struct SlotParamsReq {
     pub nnue_time_ms: Option<u64>,
     #[serde(default)]
     pub search_timeout_ms: Option<u64>,
+}
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SlotParamsReq {
+    #[serde(default)]
+    pub mcts_sims: Option<usize>,
+    #[serde(flatten)]
+    pub budget: BudgetParams,
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -113,25 +119,8 @@ pub struct AgentsListResp {
 pub struct SettingsReq {
     #[serde(default)]
     pub mcts_sims: Option<usize>,
-    #[serde(default)]
-    pub engine_budget: Option<u64>,
-
-    #[serde(default)]
-    pub engine_budget_mode: Option<String>,
-    #[serde(default)]
-    pub engine_depth: Option<i32>,
-    #[serde(default)]
-    pub engine_time_ms: Option<u64>,
-    #[serde(default)]
-    pub nnue_budget_mode: Option<String>,
-    #[serde(default)]
-    pub nnue_depth: Option<i32>,
-    #[serde(default)]
-    pub nnue_budget: Option<u64>,
-    #[serde(default)]
-    pub nnue_time_ms: Option<u64>,
-    #[serde(default)]
-    pub search_timeout_ms: Option<u64>,
+    #[serde(flatten)]
+    pub budget: BudgetParams,
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -169,24 +158,8 @@ pub struct EngineMoveReq {
     #[serde(default)]
     pub mcts_sims: Option<usize>,
 
-    #[serde(default)]
-    pub engine_budget: Option<u64>,
-    #[serde(default)]
-    pub engine_budget_mode: Option<String>,
-    #[serde(default)]
-    pub engine_depth: Option<i32>,
-    #[serde(default)]
-    pub engine_time_ms: Option<u64>,
-    #[serde(default)]
-    pub nnue_budget_mode: Option<String>,
-    #[serde(default)]
-    pub nnue_depth: Option<i32>,
-    #[serde(default)]
-    pub nnue_budget: Option<u64>,
-    #[serde(default)]
-    pub nnue_time_ms: Option<u64>,
-    #[serde(default)]
-    pub search_timeout_ms: Option<u64>,
+    #[serde(flatten)]
+    pub budget: BudgetParams,
     #[serde(default)]
     pub model_file: Option<String>,
 }
@@ -747,31 +720,24 @@ pub fn winner_code(w: Option<&str>) -> Option<i32> {
     }
 }
 
-pub fn hex_encode(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        s.push_str(&format!("{b:02x}"));
-    }
-    s
-}
+pub use bq_util::hex_encode;
 
 pub fn hex_decode(s: &str) -> Option<Vec<u8>> {
-    if !s.len().is_multiple_of(2) {
-        return None;
-    }
-    (0..s.len() / 2)
-        .map(|i| u8::from_str_radix(s.get(i * 2..i * 2 + 2)?, 16).ok())
-        .collect()
+    bq_util::hex_decode(s).ok()
 }
 
 pub fn termination_label(reason: Option<&str>) -> String {
-    match reason {
-        Some("checkmate") => "decisive",
-        Some("draw") => "quiet_draw",
-        Some("max_steps") => "max_steps",
-        _ => "unspecified",
-    }
-    .to_string()
+    use banqi_core::core::env::{OverReason, Termination};
+    const REASONS: [OverReason; 3] = [
+        OverReason::Checkmate,
+        OverReason::Draw,
+        OverReason::MaxSteps,
+    ];
+    let termination = reason
+        .and_then(|r| REASONS.iter().copied().find(|o| o.as_str() == r))
+        .map(Termination::from_over_reason)
+        .unwrap_or(Termination::Unspecified);
+    termination.as_str().to_string()
 }
 
 pub fn describe_side(slot: &SlotView) -> String {
@@ -805,20 +771,8 @@ fn model_short(file: &str) -> String {
 }
 
 pub fn piece_from_display_code(code: i64) -> Option<banqi_core::core::env::types::Piece> {
-    use banqi_core::core::env::types::{Piece, PieceType, Player};
-    if !(0..14).contains(&code) {
-        return None;
-    }
-    let piece_type = match code % 7 {
-        0 => PieceType::Soldier,
-        1 => PieceType::Cannon,
-        2 => PieceType::Horse,
-        3 => PieceType::Chariot,
-        4 => PieceType::Elephant,
-        5 => PieceType::Advisor,
-        _ => PieceType::General,
-    };
-    let player = if code < 7 { Player::Red } else { Player::Black };
+    use banqi_core::core::env::types::Piece;
+    let (player, piece_type) = banqi_core::core::env::piece_from_code(u8::try_from(code).ok()?)?;
     Some(Piece::new(piece_type, player))
 }
 
