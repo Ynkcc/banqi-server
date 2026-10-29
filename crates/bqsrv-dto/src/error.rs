@@ -1,8 +1,44 @@
-use banqi_core::core::env::error::EnvError;
-use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use axum::Json;
+use banqi_core::core::env::error::EnvError;
+use serde::Serialize;
 use serde_json::json;
+use ts_rs::TS;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ApiErrorCode {
+    GameNotFound,
+    IllegalAction,
+    GameOver,
+    HumanTurn,
+    MctsTreeMissing,
+    NnueTreeMissing,
+    BadRequest,
+    AgentNotFound,
+    AgentVariantMismatch,
+    ModelUnavailable,
+    Internal,
+}
+impl ApiErrorCode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::GameNotFound => "GAME_NOT_FOUND",
+            Self::IllegalAction => "ILLEGAL_ACTION",
+            Self::GameOver => "GAME_OVER",
+            Self::HumanTurn => "HUMAN_TURN",
+            Self::MctsTreeMissing => "MCTS_TREE_MISSING",
+            Self::NnueTreeMissing => "NNUE_TREE_MISSING",
+            Self::BadRequest => "BAD_REQUEST",
+            Self::AgentNotFound => "AGENT_NOT_FOUND",
+            Self::AgentVariantMismatch => "AGENT_VARIANT_MISMATCH",
+            Self::ModelUnavailable => "MODEL_UNAVAILABLE",
+            Self::Internal => "INTERNAL",
+        }
+    }
+}
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
     #[error("对局不存在: {0}")]
@@ -46,32 +82,33 @@ impl ApiError {
             ApiError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
-    fn code(&self) -> &'static str {
+    fn code(&self) -> ApiErrorCode {
         match self {
-            ApiError::GameNotFound(_) => "GAME_NOT_FOUND",
-            ApiError::IllegalAction { .. } => "ILLEGAL_ACTION",
-            ApiError::GameOver => "GAME_OVER",
-            ApiError::HumanTurn => "HUMAN_TURN",
-            ApiError::MctsTreeMissing => "MCTS_TREE_MISSING",
-            ApiError::NnueTreeMissing => "NNUE_TREE_MISSING",
-            ApiError::BadRequest(_) => "BAD_REQUEST",
-            ApiError::AgentNotFound(_) => "AGENT_NOT_FOUND",
-            ApiError::AgentVariantMismatch { .. } => "AGENT_VARIANT_MISMATCH",
-            ApiError::ModelUnavailable(_) => "MODEL_UNAVAILABLE",
-            ApiError::Internal(_) => "INTERNAL",
+            ApiError::GameNotFound(_) => ApiErrorCode::GameNotFound,
+            ApiError::IllegalAction { .. } => ApiErrorCode::IllegalAction,
+            ApiError::GameOver => ApiErrorCode::GameOver,
+            ApiError::HumanTurn => ApiErrorCode::HumanTurn,
+            ApiError::MctsTreeMissing => ApiErrorCode::MctsTreeMissing,
+            ApiError::NnueTreeMissing => ApiErrorCode::NnueTreeMissing,
+            ApiError::BadRequest(_) => ApiErrorCode::BadRequest,
+            ApiError::AgentNotFound(_) => ApiErrorCode::AgentNotFound,
+            ApiError::AgentVariantMismatch { .. } => ApiErrorCode::AgentVariantMismatch,
+            ApiError::ModelUnavailable(_) => ApiErrorCode::ModelUnavailable,
+            ApiError::Internal(_) => ApiErrorCode::Internal,
         }
     }
 }
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status = self.status();
+        let code = self.code();
         let body = Json(json!({
             "error": {
-                "code": self.code(),
+                "code": code.as_str(),
                 "message": self.to_string(),
             }
         }));
-        tracing::warn!(%status, code = self.code(), "API 错误: {self}");
+        tracing::warn!(%status, code = code.as_str(), "API 错误: {self}");
         (status, body).into_response()
     }
 }

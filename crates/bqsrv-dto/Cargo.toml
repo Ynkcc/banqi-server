@@ -12,5 +12,6 @@ bq-util = { workspace = true }
 axum = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+ts-rs = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

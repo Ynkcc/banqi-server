@@ -4,7 +4,9 @@ use banqi_core::core::env::{DarkChessEnv, SnapshotEnv};
 use banqi_core::core::expectimax::{BoundFlag, ExNode, ExTree};
 use serde::Serialize;
 pub use bqsrv_dto::{ExNodeSummary, ExRootInfo, ExSearchStats};
-#[derive(Debug, Clone, Serialize)]
+use ts_rs::TS;
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
 pub struct ExEdge {
     pub child_id: usize,
     pub action: usize,
@@ -17,7 +19,8 @@ pub struct ExEdge {
     pub mark: Option<String>,
     pub child_count: usize,
 }
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
 pub struct ExNodeBoard {
     pub state: crate::app::view::GameStateView,
     pub move_coords: Vec<usize>,

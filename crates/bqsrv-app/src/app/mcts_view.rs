@@ -3,7 +3,9 @@ use banqi_core::core::env::{GameEnv, SnapshotEnv};
 use banqi_core::core::mcts::MctsArena;
 pub use banqi_engine::engine::gumbel::{MctsSearchStats, MctsTree};
 use serde::Serialize;
-#[derive(Debug, Clone, Serialize)]
+use ts_rs::TS;
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
 pub struct MctsEdge {
     pub child_id: usize,
     pub action: usize,
@@ -15,7 +17,8 @@ pub struct MctsEdge {
     pub is_chance: bool,
     pub chance_prob: f32,
 }
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
 pub struct MctsNodeSummary {
     pub id: usize,
     pub n: u32,
@@ -27,13 +30,17 @@ pub struct MctsNodeSummary {
     pub is_expanded: bool,
     pub edge_count: usize,
 }
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
 pub struct MctsRootInfo {
     pub root: MctsNodeSummary,
     pub chosen_action: usize,
+
+    #[ts(as = "bqsrv_dto::MctsStatsDto")]
     pub stats: MctsSearchStats,
 }
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
 pub struct MctsNodeDetail {
     pub id: usize,
     pub prior: f32,
@@ -49,7 +56,8 @@ pub struct MctsNodeDetail {
     pub child_count: usize,
     pub outcome_count: usize,
 }
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
 pub struct MctsNodeBoard {
     pub state: crate::app::view::GameStateView,
     pub move_coords: Vec<usize>,

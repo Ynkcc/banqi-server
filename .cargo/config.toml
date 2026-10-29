@@ -1,10 +1,7 @@
-# 编译基线按目标架构分派（与 banqi-engine 的同名配置保持一致）。
-#
-# x86_64：v3（AVX2 + FMA）。搜索/环境热路径（位棋盘、走子生成、惰性物化）
-# 同样受益。注意：产物不兼容 v3 之前的旧 CPU（<2013）。
-#
-# aarch64：不设额外 flag——NEON（asimd）是 aarch64 目标的强制基线，
-# 自动向量化可直接使用，产物兼容全部 ARMv8-A+ 设备。目标机本机编译时可
-# 叠加 `-C target-cpu=native` 进一步调优。
-[target.'cfg(target_arch = "x86_64")']
-rustflags = ["-C", "target-cpu=x86-64-v3"]
+# ts-rs 导出基准目录：relative = true 以本 config 的父目录（banqi-server/）为基准，
+# ../banqi-frontend/src/api/generated 即项目根下的 banqi-frontend/src/api/generated。
+# 生成命令：cd banqi-server && cargo test -p bqsrv-dto -p bqsrv-app export_bindings
+[env]
+TS_RS_EXPORT_DIR = { value = "../banqi-frontend/src/api/generated", relative = true }
+# u64/i64 等（elapsed_ms 等）按 number 生成，而非默认的 bigint（前端按 number 消费）
+TS_RS_LARGE_INT = "number"
