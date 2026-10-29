@@ -1,14 +1,13 @@
-use crate::ai;
-use crate::api::parse_variant_or_err;
-use crate::app::player::{PlayerSlot, StrategyKind};
-use crate::app::sync::{lock, read_lock, write_lock};
-use crate::dto::{
-    ArchivedGameDetail, CreateGameReq, DryRunReq, GameCreatedResp, GameListResp, GameStateResp,
-    MoveActionResp, MoveReq, MoveResp, PutSlotsReq, RecentGamesQuery, RecentGamesResp,
-    ReplayGameReq, ReplayResp, SlotReq, SlotsReq, SuggestionResp, UndoReq,
+use bqsrv_app::ai;
+use crate::parse_variant_or_err;
+use bqsrv_app::app::player::{PlayerSlot, StrategyKind};
+use bqsrv_app::app::sync::{lock, read_lock, write_lock};
+use bqsrv_dto::{
+    ApiError, ArchivedGameDetail, CreateGameReq, DryRunReq, GameCreatedResp, GameListResp,
+    GameStateResp, MoveActionResp, MoveReq, MoveResp, PutSlotsReq, RecentGamesQuery,
+    RecentGamesResp, ReplayGameReq, ReplayResp, SlotReq, SlotsReq, SuggestionResp, UndoReq,
 };
-use crate::error::ApiError;
-use crate::state::{GameSession, SharedState, get_mut_session, get_session, parse_game_id};
+use bqsrv_app::state::{GameSession, SharedState, get_mut_session, get_session, parse_game_id};
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -54,9 +53,9 @@ async fn build_slots(
     app: &SharedState,
     req: Option<&SlotsReq>,
     variant: banqi_core::core::env::Variant,
-) -> Result<(crate::app::player::Slots, [Option<String>; 2]), ApiError> {
+) -> Result<(bqsrv_app::app::player::Slots, [Option<String>; 2]), ApiError> {
     let Some(req) = req else {
-        return Ok((crate::app::player::Slots::all_human(), [None, None]));
+        return Ok((bqsrv_app::app::player::Slots::all_human(), [None, None]));
     };
     let red = match &req.red {
         Some(r) => build_slot(app, r.clone(), variant).await?,
@@ -70,7 +69,7 @@ async fn build_slots(
         req.red.as_ref().and_then(|r| r.label.clone()),
         req.black.as_ref().and_then(|b| b.label.clone()),
     ];
-    Ok((crate::app::player::Slots::new(red, black), labels))
+    Ok((bqsrv_app::app::player::Slots::new(red, black), labels))
 }
 pub async fn create_game(
     State(app): State<SharedState>,
@@ -85,7 +84,7 @@ pub async fn create_game(
                 let s = GameSession::from_snapshot(
                     snap.variant,
                     snap.clone(),
-                    crate::app::player::Slots::all_human(),
+                    bqsrv_app::app::player::Slots::all_human(),
                 );
                 let (terminated, truncated, _) = s.over_state();
                 if terminated || truncated {
@@ -147,7 +146,7 @@ pub async fn create_game(
 }
 pub async fn list_games(State(app): State<SharedState>) -> Json<GameListResp> {
     let games = read_lock(&app.games);
-    let mut summaries: Vec<crate::dto::GameSummary> =
+    let mut summaries: Vec<bqsrv_dto::GameSummary> =
         games.iter().map(|(id, s)| s.summary(*id)).collect();
     summaries.sort_by(|a, b| a.game_id.cmp(&b.game_id));
     Json(GameListResp { games: summaries })
@@ -192,7 +191,7 @@ pub async fn move_piece(
     let game_id = parse_game_id(&id)?;
     let reveal = match req.reveal {
         None => None,
-        Some(code) => Some(crate::dto::piece_from_display_code(code).ok_or_else(|| {
+        Some(code) => Some(bqsrv_dto::piece_from_display_code(code).ok_or_else(|| {
             ApiError::BadRequest(format!("非法 reveal 棋子码: {code}（应为明子码 0-13）"))
         })?),
     };
@@ -213,7 +212,7 @@ pub async fn move_piece(
 pub async fn run(
     State(app): State<SharedState>,
     Path(id): Path<String>,
-    req: Option<Json<crate::dto::RunReq>>,
+    req: Option<Json<bqsrv_dto::RunReq>>,
 ) -> Result<Json<MoveResp>, ApiError> {
     let game_id = parse_game_id(&id)?;
     let agent_id = req
@@ -292,7 +291,7 @@ pub async fn put_slots(
     let s = get_mut_session(&mut games, &id, game_id)?;
     for (player, slot, label) in updates {
         s.set_slot_label(player, label);
-        tracing::info!(game = %game_id, "切换槽位: {} → {}", crate::dto::player_str(player),
+        tracing::info!(game = %game_id, "切换槽位: {} → {}", bqsrv_dto::player_str(player),
             match &slot { PlayerSlot::Human => "Human".to_string(),
                 PlayerSlot::Agent(agent_id) => format!("Agent({agent_id})"),
                 PlayerSlot::Strategy { kind, .. } => kind.as_str().to_string() });
@@ -314,7 +313,7 @@ pub async fn move_action(
     let games = read_lock(&app.games);
     let s = get_session(&games, &id, game_id)?;
     let action =
-        crate::app::envops::action_for_coords(s.core.variant, &s.core.current, q.from, q.to)
+        bqsrv_app::app::envops::action_for_coords(s.core.variant, &s.core.current, q.from, q.to)
             .map_err(ApiError::BadRequest)?;
     Ok(Json(MoveActionResp { action }))
 }
@@ -374,7 +373,7 @@ pub async fn replay_recent_game(
     Path(id): Path<String>,
 ) -> Result<Json<ReplayResp>, ApiError> {
     let detail = find_archived(&app, &id)?;
-    let resp = crate::app::replay::build_replay(&detail).map_err(ApiError::Internal)?;
+    let resp = bqsrv_app::app::replay::build_replay(&detail).map_err(ApiError::Internal)?;
     Ok(Json(resp))
 }
 
@@ -387,7 +386,7 @@ pub async fn replay_as_new_game(
     let req = req.map(|Json(r)| r).unwrap_or(ReplayGameReq { slots: None, from_ply: None });
     let from_ply = req.from_ply.unwrap_or(0);
     let snap = if from_ply > 0 {
-        crate::app::replay::snapshot_at_ply(&detail, from_ply)
+        bqsrv_app::app::replay::snapshot_at_ply(&detail, from_ply)
             .map_err(ApiError::Internal)?
     } else {
         PositionSnapshot::from_fen(detail.initial_fen.trim())

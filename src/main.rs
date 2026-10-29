@@ -1,14 +1,5 @@
-mod ai;
-mod api;
-pub mod app;
-mod config;
-mod dto;
-mod error;
-mod mcts;
-mod nnue;
-mod state;
-mod web;
-use state::AppState;
+use bqsrv_app::state::AppState;
+use bqsrv_config::ServerConfig;
 use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
 #[tokio::main]
@@ -18,7 +9,7 @@ async fn main() {
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
-    let config = match config::ServerConfig::from_env_and_args() {
+    let config = match ServerConfig::from_env_and_args() {
         Ok(c) => c,
         Err(e) => {
             eprintln!("{e}");
@@ -35,7 +26,7 @@ async fn main() {
         app_state.config.sessions,
         app_state.config.device
     );
-    let router = api::router(app_state);
+    let router = bqsrv_api::router(app_state);
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .unwrap_or_else(|e| panic!("绑定 {addr} 失败: {e}"));

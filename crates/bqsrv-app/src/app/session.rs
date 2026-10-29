@@ -1,37 +1,9 @@
 use crate::app::envops::{self, StepOutcome};
-use banqi_core::core::env::error::EnvError;
 use banqi_core::core::env::types::Piece;
 use banqi_core::core::env::{
     DarkChessEnv, GameEnv, MoveHistory, MoveRecord, PositionSnapshot, SnapshotEnv, Variant,
 };
-use std::fmt;
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SessionError {
-    GameOver,
-    IllegalAction { action: usize },
-    BadRequest(String),
-    Internal(String),
-}
-impl fmt::Display for SessionError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            SessionError::GameOver => write!(f, "对局已结束"),
-            SessionError::IllegalAction { action } => write!(f, "无效动作: {action}"),
-            SessionError::BadRequest(s) => write!(f, "{s}"),
-            SessionError::Internal(s) => write!(f, "内部错误: {s}"),
-        }
-    }
-}
-impl std::error::Error for SessionError {}
-impl From<EnvError> for SessionError {
-    fn from(e: EnvError) -> Self {
-        match e {
-            EnvError::IllegalAction { action } => SessionError::IllegalAction { action },
-            EnvError::InvalidScenario { context } => SessionError::BadRequest(context.to_string()),
-            other => SessionError::Internal(other.to_string()),
-        }
-    }
-}
+pub use bqsrv_dto::SessionError;
 #[derive(Debug, Clone)]
 pub struct SnapshotSession {
     pub variant: Variant,

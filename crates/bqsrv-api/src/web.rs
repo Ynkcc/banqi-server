@@ -2,7 +2,7 @@ use axum::http::{StatusCode, Uri, header};
 use axum::response::{Html, IntoResponse, Response};
 use rust_embed::RustEmbed;
 #[derive(RustEmbed)]
-#[folder = "../banqi-frontend/dist"]
+#[folder = "../../../banqi-frontend/dist"]
 struct WebAssets;
 pub async fn handler(uri: Uri) -> Response {
     let path = uri.path().trim_start_matches('/');

@@ -1,7 +1,6 @@
-use crate::app::mcts_view::{MctsTree, MctsTreeBox};
+use crate::app::mcts_view::{MctsTree, MctsTreeBox, mcts_stats_from_session};
 use crate::app::models::{EngineKind, ModelPool};
-use crate::app::search::{BudgetMode, SearchBudget};
-use crate::dto::{MctsStatsDto, NnueStatsDto};
+use bqsrv_dto::{MctsStatsDto, NnueStatsDto};
 use banqi_core::core::env::{DarkChessEnv, PositionSnapshot, SnapshotEnv};
 use banqi_core::core::expectimax::rule_eval::RuleMaterialEval;
 use banqi_engine::engine::{CaptureFirstPolicy, Policy, RandomPolicy, RevealFirstPolicy};
@@ -91,52 +90,7 @@ impl StrategyKind {
         }
     }
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct EngineParams {
-    pub mcts_sims: usize,
-
-    pub engine_budget: SearchBudget,
-    pub nnue_budget: SearchBudget,
-}
-impl EngineParams {
-    pub fn clamped(mut self) -> Self {
-        self.mcts_sims = self.mcts_sims.max(1);
-        self.engine_budget = self.engine_budget.clamped();
-        self.nnue_budget = self.nnue_budget.clamped();
-        self
-    }
-    pub fn updated(
-        self,
-        mcts_sims: Option<usize>,
-        engine_budget: Option<SearchBudget>,
-        nnue_budget: Option<SearchBudget>,
-    ) -> Self {
-        let mut p = self;
-        if let Some(v) = mcts_sims {
-            p.mcts_sims = v;
-        }
-        if let Some(v) = engine_budget {
-            p.engine_budget = v;
-        }
-        if let Some(v) = nnue_budget {
-            p.nnue_budget = v;
-        }
-        p.clamped()
-    }
-}
-impl Default for EngineParams {
-    fn default() -> Self {
-        Self {
-            mcts_sims: 200,
-            engine_budget: SearchBudget {
-                mode: crate::app::search::BudgetMode::Nodes,
-                nodes: 300_000,
-                ..SearchBudget::default()
-            },
-            nnue_budget: SearchBudget::default(),
-        }
-    }
-}
+pub use bqsrv_config::EngineParams;
 #[derive(Debug, Clone)]
 pub enum PlayerSlot {
     Human,
@@ -361,7 +315,7 @@ fn mcts_decision(tree: MctsTree<DarkChessEnv>) -> Decision {
         Some(root.value_sum / n as f32)
     };
     let boxed: MctsTreeBox = Box::new(tree);
-    let mcts_stats = MctsStatsDto::from_session(Some(&boxed));
+    let mcts_stats = mcts_stats_from_session(Some(&boxed));
     Decision {
         action,
         mcts_tree: Some(boxed),
@@ -382,6 +336,7 @@ pub fn dry_run(
 mod tests {
     use super::*;
     use crate::app::envops;
+    use crate::app::search::{BudgetMode, SearchBudget};
     use banqi_core::core::env::Variant;
     fn initial_snap() -> PositionSnapshot {
         envops::initial_snapshot(Variant::DarkChess4x8)
@@ -500,7 +455,7 @@ mod tests {
     }
     #[test]
     fn expectimax_rule_stats_flow_into_archive() {
-        use crate::dto::StepStatsDto;
+        use bqsrv_dto::StepStatsDto;
         use crate::state::GameSession;
         let slot = PlayerSlot::strategy(
             StrategyKind::Expectimax,
@@ -537,42 +492,6 @@ mod tests {
     fn human_slot_decision_errors() {
         let snap = initial_snap();
         assert!(decide(&snap, &PlayerSlot::Human, None, &dummy_pool()).is_err());
-    }
-    #[test]
-    fn engine_params_partial_update_clamps() {
-        let base = EngineParams::default();
-        let p = base.updated(
-            Some(0),
-            Some(SearchBudget {
-                nodes: 0,
-                depth: 0,
-                timeout_ms: 0,
-                ..Default::default()
-            }),
-            Some(SearchBudget {
-                nodes: 0,
-                depth: 0,
-                timeout_ms: 0,
-                ..Default::default()
-            }),
-        );
-        assert_eq!(p.mcts_sims, 1);
-        assert_eq!(p.engine_budget.nodes, 1);
-        assert_eq!(p.nnue_budget.nodes, 1);
-        assert_eq!(p.nnue_budget.depth, 1);
-        assert_eq!(p.nnue_budget.timeout_ms, 1);
-        let p = base.updated(
-            None,
-            Some(SearchBudget {
-                mode: BudgetMode::Nodes,
-                nodes: 500_000,
-                ..Default::default()
-            }),
-            None,
-        );
-        assert_eq!(p.engine_budget.nodes, 500_000);
-        assert_eq!(p.mcts_sims, base.mcts_sims);
-        assert_eq!(p.nnue_budget, base.nnue_budget);
     }
     fn dummy_pool() -> ModelPool {
         ModelPool::new(

@@ -33,10 +33,10 @@ fn f_i64(v: &Value, key: &str) -> Option<i64> {
 }
 
 fn coord(v: &Value, norm_key: &str, raw_keys: &[&str]) -> Option<(i64, i64)> {
-    if let Some(p) = v.get(norm_key) {
-        if let (Some(x), Some(y)) = (f_i64(p, "x"), f_i64(p, "y")) {
-            return Some((x, y));
-        }
+    if let Some(p) = v.get(norm_key)
+        && let (Some(x), Some(y)) = (f_i64(p, "x"), f_i64(p, "y"))
+    {
+        return Some((x, y));
     }
     for pair in raw_keys.chunks(2) {
         if let (Some(x), Some(y)) = (f_i64(v, pair[0]), f_i64(v, pair[1])) {
@@ -160,7 +160,7 @@ fn initial_env_from_frames(
             v.get("cells")
                 .filter(|c| c.as_array().map(|a| a.len()).unwrap_or(0) == cfg.total_positions)
         })
-        .last()
+        .next_back()
         .ok_or("帧窗缺少 cells 锚点（begin/ctx），无法构造初始局面")?;
     let arr = cells.as_array().expect("已校验为数组");
 
@@ -471,6 +471,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::identity_op, clippy::erasing_op)]
     fn replay_rejects_corrupted_history() {
         let initial = all_hidden_snapshot(Variant::DarkChess4x8);
         let mut env = DarkChessEnv::from_snapshot(&initial).unwrap();

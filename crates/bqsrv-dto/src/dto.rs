@@ -1,3 +1,4 @@
+use bqsrv_config::EngineParams;
 use serde::{Deserialize, Serialize};
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -189,22 +190,30 @@ pub struct EngineMoveReq {
     #[serde(default)]
     pub model_file: Option<String>,
 }
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize)]
 pub struct ActionView {
     pub action: usize,
     pub from: usize,
     pub to: usize,
     pub is_chance: bool,
 }
-impl From<crate::app::view::ActionView> for ActionView {
-    fn from(a: crate::app::view::ActionView) -> Self {
-        Self {
-            action: a.action,
-            from: a.from,
-            to: a.to,
-            is_chance: a.is_chance,
-        }
-    }
+#[derive(Debug, Clone, Serialize)]
+pub struct GameStateView {
+    pub board: Vec<String>,
+    pub current_player: String,
+    pub move_counter: u32,
+    pub total_step_counter: u32,
+    pub dead_red: Vec<String>,
+    pub dead_black: Vec<String>,
+    pub hidden_red: Vec<String>,
+    pub hidden_black: Vec<String>,
+    pub action_masks: Vec<i32>,
+    pub reveal_probabilities: Vec<f32>,
+    pub bitboards: std::collections::HashMap<String, Vec<bool>>,
+    pub hp_red: i32,
+    pub hp_black: i32,
+    pub variant: String,
+    pub fen: String,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SlotView {
@@ -254,6 +263,40 @@ pub struct SlotsView {
     pub red: SlotView,
     pub black: SlotView,
 }
+#[derive(Debug, Clone, Serialize)]
+pub struct ExSearchStats {
+    pub mode: String,
+    pub depth: i32,
+    pub budget: u64,
+    pub time_limit_ms: u64,
+    pub nodes: u64,
+    pub reached_depth: i32,
+    pub elapsed_ms: u64,
+}
+#[derive(Debug, Clone, Serialize)]
+pub struct ExNodeSummary {
+    pub id: usize,
+    pub action: usize,
+    pub value: f32,
+    pub alpha: f32,
+    pub beta: f32,
+    pub depth: i32,
+    pub flag: String,
+    pub mark: Option<String>,
+    pub is_chance: bool,
+    pub is_outcome: bool,
+    pub chance_prob: f32,
+    pub is_root: bool,
+    pub is_null_probe: bool,
+    pub player: String,
+    pub child_count: usize,
+}
+#[derive(Debug, Clone, Serialize)]
+pub struct ExRootInfo {
+    pub root: ExNodeSummary,
+    pub chosen_action: usize,
+    pub stats: ExSearchStats,
+}
 #[derive(Debug, Serialize)]
 pub struct SuggestionResp {
     pub version: u64,
@@ -272,12 +315,12 @@ pub struct SuggestionResp {
     pub nnue_stats: Option<NnueStatsDto>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub search_info: Option<crate::nnue::ExRootInfo>,
+    pub search_info: Option<ExRootInfo>,
 }
 #[derive(Debug, Serialize)]
 pub struct GameStateResp {
     #[serde(flatten)]
-    pub game: crate::app::view::GameStateView,
+    pub game: GameStateView,
     pub game_id: String,
     pub version: u64,
     pub max_steps: usize,
@@ -340,10 +383,16 @@ impl From<&banqi_engine::engine::MctsSearchStats> for MctsStatsDto {
         }
     }
 }
-impl MctsStatsDto {
-    pub fn from_session(tree: Option<&crate::mcts::MctsTreeBox>) -> Option<Self> {
-        Some(Self::from(&tree?.root_info().stats))
-    }
+#[derive(Debug, Clone)]
+pub struct NnueSearchStats {
+    pub engine: &'static str,
+    pub mode: &'static str,
+    pub depth: i32,
+    pub budget: u64,
+    pub time_limit_ms: u64,
+    pub nodes: u64,
+    pub reached_depth: i32,
+    pub elapsed_ms: u64,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NnueStatsDto {
@@ -356,10 +405,23 @@ pub struct NnueStatsDto {
     pub reached_depth: i32,
     pub elapsed_ms: u64,
 }
-impl From<&crate::app::search::NnueSearchStats> for NnueStatsDto {
-    fn from(s: &crate::app::search::NnueSearchStats) -> Self {
+impl From<&NnueSearchStats> for NnueStatsDto {
+    fn from(s: &NnueSearchStats) -> Self {
         Self {
             engine: s.engine.to_string(),
+            mode: s.mode.to_string(),
+            depth: s.depth,
+            budget: s.budget,
+            time_limit_ms: s.time_limit_ms,
+            nodes: s.nodes,
+            reached_depth: s.reached_depth,
+            elapsed_ms: s.elapsed_ms,
+        }
+    }
+}
+impl From<&NnueSearchStats> for ExSearchStats {
+    fn from(s: &NnueSearchStats) -> Self {
+        Self {
             mode: s.mode.to_string(),
             depth: s.depth,
             budget: s.budget,
@@ -593,8 +655,8 @@ pub struct SettingsResp {
     pub nnue_time_ms: u64,
     pub search_timeout_ms: u64,
 }
-impl From<crate::app::player::EngineParams> for SettingsResp {
-    fn from(p: crate::app::player::EngineParams) -> Self {
+impl From<EngineParams> for SettingsResp {
+    fn from(p: EngineParams) -> Self {
         Self {
             mcts_sims: p.mcts_sims,
             engine_budget: p.engine_budget.nodes,
@@ -659,8 +721,14 @@ pub struct MoveActionResp {
     pub action: Option<usize>,
 }
 
+pub fn player_label(p: banqi_core::core::env::types::Player) -> String {
+    match p {
+        banqi_core::core::env::types::Player::Red => "Red".to_string(),
+        banqi_core::core::env::types::Player::Black => "Black".to_string(),
+    }
+}
 pub fn player_str(p: banqi_core::core::env::types::Player) -> String {
-    crate::app::common::player_label(p)
+    player_label(p)
 }
 pub fn winner_str(w: Option<i32>) -> Option<String> {
     match w {
@@ -688,7 +756,7 @@ pub fn hex_encode(bytes: &[u8]) -> String {
 }
 
 pub fn hex_decode(s: &str) -> Option<Vec<u8>> {
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return None;
     }
     (0..s.len() / 2)

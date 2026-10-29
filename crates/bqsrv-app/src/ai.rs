@@ -1,10 +1,11 @@
+use crate::app::mcts_view::mcts_stats_from_session;
 use crate::app::player::{self, PlayerSlot, StrategyKind};
 use crate::app::sync::{read_lock, write_lock};
-use crate::dto::{
+use bqsrv_dto::{
     AppliedAction, DryRunReq, GameStateResp, MctsStatsDto, MoveResp, NnueStatsDto, SuggestionResp,
     player_str,
 };
-use crate::error::ApiError;
+use bqsrv_dto::ApiError;
 use crate::nnue::{ExRootInfo, ex_root_info};
 use crate::state::{
     AppState, SharedState, get_mut_session, get_session, store_manual_search_trees,
@@ -113,9 +114,9 @@ fn apply_strategy_action(
     let outcome = s.apply_action(action)?;
     s.mcts_tree = mcts_tree;
     s.expectimax_tree = ex_tree;
-    let mcts_stats = MctsStatsDto::from_session(s.mcts_tree.as_ref());
+    let mcts_stats = mcts_stats_from_session(s.mcts_tree.as_ref());
 
-    s.capture_step_stats(crate::dto::StepStatsDto {
+    s.capture_step_stats(bqsrv_dto::StepStatsDto {
         mcts: mcts_stats.clone(),
         nnue: nnue_stats.clone(),
         note: None,
@@ -184,7 +185,7 @@ pub async fn human_move(
     reveal: Option<banqi_core::core::env::types::Piece>,
     mover_label: Option<String>,
     note: Option<String>,
-    diag: Option<crate::dto::StepStatsDto>,
+    diag: Option<bqsrv_dto::StepStatsDto>,
 ) -> Result<MoveResp, ApiError> {
     let (mut state, mover, human_view, strategy_version) = {
         let mut games = write_lock(&app.games);

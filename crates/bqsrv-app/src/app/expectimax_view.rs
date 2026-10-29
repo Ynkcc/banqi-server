@@ -4,6 +4,7 @@ use banqi_core::core::env::actions::action_lookup_tables;
 use banqi_core::core::env::{DarkChessEnv, SnapshotEnv};
 use banqi_core::core::expectimax::{BoundFlag, ExNode, ExTree};
 use serde::Serialize;
+pub use bqsrv_dto::{ExNodeSummary, ExRootInfo, ExSearchStats};
 #[derive(Debug, Clone, Serialize)]
 pub struct ExEdge {
     pub child_id: usize,
@@ -16,53 +17,6 @@ pub struct ExEdge {
     pub flag: String,
     pub mark: Option<String>,
     pub child_count: usize,
-}
-#[derive(Debug, Clone, Serialize)]
-pub struct ExNodeSummary {
-    pub id: usize,
-    pub action: usize,
-    pub value: f32,
-    pub alpha: f32,
-    pub beta: f32,
-    pub depth: i32,
-    pub flag: String,
-    pub mark: Option<String>,
-    pub is_chance: bool,
-    pub is_outcome: bool,
-    pub chance_prob: f32,
-    pub is_root: bool,
-    pub is_null_probe: bool,
-    pub player: String,
-    pub child_count: usize,
-}
-#[derive(Debug, Clone, Serialize)]
-pub struct ExSearchStats {
-    pub mode: String,
-    pub depth: i32,
-    pub budget: u64,
-    pub time_limit_ms: u64,
-    pub nodes: u64,
-    pub reached_depth: i32,
-    pub elapsed_ms: u64,
-}
-impl From<&NnueSearchStats> for ExSearchStats {
-    fn from(s: &NnueSearchStats) -> Self {
-        Self {
-            mode: s.mode.to_string(),
-            depth: s.depth,
-            budget: s.budget,
-            time_limit_ms: s.time_limit_ms,
-            nodes: s.nodes,
-            reached_depth: s.reached_depth,
-            elapsed_ms: s.elapsed_ms,
-        }
-    }
-}
-#[derive(Debug, Clone, Serialize)]
-pub struct ExRootInfo {
-    pub root: ExNodeSummary,
-    pub chosen_action: usize,
-    pub stats: ExSearchStats,
 }
 #[derive(Debug, Clone, Serialize)]
 pub struct ExNodeBoard {

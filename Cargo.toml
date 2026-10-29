@@ -1,7 +1,47 @@
-[package]
-name = "banqi-server"
+[workspace]
+resolver = "2"
+members = [
+    "crates/bqsrv-config",
+    "crates/bqsrv-dto",
+    "crates/bqsrv-app",
+    "crates/bqsrv-api",
+]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
+
+[workspace.dependencies]
+# 内部 crate
+bqsrv-config = { path = "crates/bqsrv-config" }
+bqsrv-dto = { path = "crates/bqsrv-dto" }
+bqsrv-app = { path = "crates/bqsrv-app" }
+bqsrv-api = { path = "crates/bqsrv-api" }
+banqi-core = { path = "../banqi-core/crates/banqi-core" }
+banqi-engine = { path = "../banqi-engine" }
+# HTTP API
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
+# 序列化
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+uuid = { version = "1", features = ["v4"] }
+# 错误处理
+thiserror = "2"
+# 日志
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# banqi-cli 专用（server 二进制不使用，链接时不引入）
+clap = { version = "4", default-features = false, features = ["std", "help", "usage", "error-context", "derive", "env"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "blocking"] }
+# 内嵌 Web 前端（banqi-frontend/dist）：debug 模式直接读文件系统（热改即生效），release 编译期打包进二进制
+rust-embed = "8"
+mime_guess = "2.0"
+
+[package]
+name = "banqi-server"
+version.workspace = true
+edition.workspace = true
 description = "Banqi 暗棋对弈 HTTP 服务：axum REST API + ONNX 推理 + Gumbel MCTS AI 对手"
 
 [[bin]]
@@ -14,30 +54,20 @@ name = "banqi-cli"
 path = "src/bin/cli.rs"
 
 [dependencies]
-banqi-core = { path = "../banqi-core" }
-banqi-engine = { path = "../banqi-engine" }
-# 共享应用层已并入本 crate（src/app/，原 banqi-app crate，见 archive/banqi-app）
-
-axum = "0.8"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-uuid = { version = "1", features = ["v4"] }
-thiserror = "2"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-
-# banqi-cli 专用（server 二进制不使用，链接时不引入）
-clap = { version = "4", default-features = false, features = ["std", "help", "usage", "error-context", "derive", "env"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "blocking"] }
-
-# 内嵌 Web 前端（banqi-frontend/dist）：debug 模式直接读文件系统（热改即生效），release 编译期打包进二进制
-rust-embed = "8"
-mime_guess = "2.0"
+bqsrv-api = { workspace = true }
+bqsrv-app = { workspace = true }
+bqsrv-config = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+serde_json = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+reqwest = { workspace = true }
 
 [features]
 default = ["onnx"]
-# 透传到底层推理库的 feature（与 banqi-engine 对齐）
-torch = ["banqi-engine/torch"]
-onnx = ["banqi-engine/onnx"]
-onnx-cuda = ["onnx", "banqi-engine/onnx-cuda"]
+# 透传到底层推理库的 feature（经 bqsrv-app 映射到 banqi-engine）
+torch = ["bqsrv-app/torch"]
+onnx = ["bqsrv-app/onnx"]
+onnx-cuda = ["onnx", "bqsrv-app/onnx-cuda"]

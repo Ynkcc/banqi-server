@@ -1,8 +1,7 @@
-use crate::app::models::EngineKind;
-use crate::app::player::{self, EngineParams, PlayerSlot, StrategyKind};
-use crate::dto::{EngineMoveReq, EngineMoveResp};
-use crate::error::ApiError;
-use crate::state::{GameSession, SharedState};
+use bqsrv_app::app::models::EngineKind;
+use bqsrv_app::app::player::{self, EngineParams, PlayerSlot, StrategyKind};
+use bqsrv_dto::{ApiError, EngineMoveReq, EngineMoveResp};
+use bqsrv_app::state::{GameSession, SharedState};
 use axum::Json;
 use axum::extract::State;
 use banqi_core::core::env::PositionSnapshot;
@@ -20,7 +19,7 @@ pub async fn engine_move(
 
     let snap = match req.frames.as_deref() {
         Some(frames) if !frames.is_empty() => {
-            match crate::app::ffq_frames::replay_frames(&snap, frames) {
+            match bqsrv_app::app::ffq_frames::replay_frames(&snap, frames) {
                 Ok(replayed) => {
                     tracing::info!(
                         "engine/move: 帧回放成功（{} 手，chase 窗口 {} 项）",
@@ -35,11 +34,11 @@ pub async fn engine_move(
         _ => snap,
     };
     let variant = snap.variant;
-    let current_player = crate::dto::player_str(snap.current_player);
+    let current_player = bqsrv_dto::player_str(snap.current_player);
     let session = GameSession::from_snapshot(
         variant,
         snap.clone(),
-        crate::app::player::Slots::all_human(),
+        bqsrv_app::app::player::Slots::all_human(),
     );
     let (terminated, truncated, _) = session.over_state();
     if terminated || truncated {
@@ -52,7 +51,7 @@ pub async fn engine_move(
         .unwrap_or(false);
 
     let (kind, slot) = if rule_engine {
-        let budget = crate::state::AppState::build_budget(
+        let budget = bqsrv_app::state::AppState::build_budget(
             app.params().engine_budget,
             req.engine_budget_mode.as_deref(),
             req.engine_budget,

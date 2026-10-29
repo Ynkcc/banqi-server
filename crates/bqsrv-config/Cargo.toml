@@ -1,0 +1,8 @@
+[package]
+name = "bqsrv-config"
+version.workspace = true
+edition.workspace = true
+description = "Banqi 对弈服务配置层：服务启动参数解析校验与搜索预算/引擎参数类型"
+
+[dependencies]
+banqi-core = { workspace = true }

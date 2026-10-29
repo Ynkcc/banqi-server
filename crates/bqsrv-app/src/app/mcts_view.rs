@@ -113,6 +113,9 @@ pub fn mcts_node_summary<G: GameEnv>(arena: &MctsArena<G>, node_id: usize) -> Mc
     }
 }
 pub type MctsTreeBox = Box<dyn MctsTreeView>;
+pub fn mcts_stats_from_session(tree: Option<&MctsTreeBox>) -> Option<bqsrv_dto::MctsStatsDto> {
+    Some(bqsrv_dto::MctsStatsDto::from(&tree?.root_info().stats))
+}
 pub trait MctsTreeView: Send + Sync {
     fn root_info(&self) -> MctsRootInfo;
     fn children(&self, node_id: usize) -> Vec<MctsEdge>;

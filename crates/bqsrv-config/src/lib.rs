@@ -1,6 +1,124 @@
-use crate::app::search::SearchBudget;
 use banqi_core::core::env::Variant;
+use banqi_core::core::expectimax::SearchConfig;
 use std::path::PathBuf;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BudgetMode {
+    Nodes,
+    DepthNodes,
+    Time,
+}
+impl BudgetMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BudgetMode::Nodes => "nodes",
+            BudgetMode::DepthNodes => "depth_nodes",
+            BudgetMode::Time => "time",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Self> {
+        match s
+            .trim()
+            .to_ascii_lowercase()
+            .replace(['-', '_', '+', ' '], "")
+            .as_str()
+        {
+            "nodes" => Some(BudgetMode::Nodes),
+            "depthnodes" => Some(BudgetMode::DepthNodes),
+            "time" => Some(BudgetMode::Time),
+            _ => None,
+        }
+    }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SearchBudget {
+    pub mode: BudgetMode,
+    pub nodes: u64,
+    pub depth: i32,
+    pub time_ms: u64,
+    pub timeout_ms: u64,
+}
+impl Default for SearchBudget {
+    fn default() -> Self {
+        Self {
+            mode: BudgetMode::DepthNodes,
+            nodes: 200_000,
+            depth: 8,
+            time_ms: 5_000,
+            timeout_ms: 60_000,
+        }
+    }
+}
+impl SearchBudget {
+    pub fn clamped(mut self) -> Self {
+        self.nodes = self.nodes.max(1);
+        self.depth = self.depth.max(1);
+        self.timeout_ms = self.timeout_ms.max(1);
+        self
+    }
+    pub fn to_search_config(&self) -> SearchConfig {
+        let mut cfg = SearchConfig::default();
+        let timeout = self.timeout_ms.max(1);
+        cfg.time_limit_ms = match self.mode {
+            BudgetMode::Time if self.time_ms > 0 => self.time_ms.min(timeout),
+            _ => timeout,
+        };
+        cfg.node_budget = match self.mode {
+            BudgetMode::Time => u64::MAX,
+            _ => self.nodes.max(1),
+        };
+        cfg.max_depth = match self.mode {
+            BudgetMode::DepthNodes => self.depth.max(1),
+            _ => 64,
+        };
+        cfg
+    }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EngineParams {
+    pub mcts_sims: usize,
+
+    pub engine_budget: SearchBudget,
+    pub nnue_budget: SearchBudget,
+}
+impl EngineParams {
+    pub fn clamped(mut self) -> Self {
+        self.mcts_sims = self.mcts_sims.max(1);
+        self.engine_budget = self.engine_budget.clamped();
+        self.nnue_budget = self.nnue_budget.clamped();
+        self
+    }
+    pub fn updated(
+        self,
+        mcts_sims: Option<usize>,
+        engine_budget: Option<SearchBudget>,
+        nnue_budget: Option<SearchBudget>,
+    ) -> Self {
+        let mut p = self;
+        if let Some(v) = mcts_sims {
+            p.mcts_sims = v;
+        }
+        if let Some(v) = engine_budget {
+            p.engine_budget = v;
+        }
+        if let Some(v) = nnue_budget {
+            p.nnue_budget = v;
+        }
+        p.clamped()
+    }
+}
+impl Default for EngineParams {
+    fn default() -> Self {
+        Self {
+            mcts_sims: 200,
+            engine_budget: SearchBudget {
+                mode: BudgetMode::Nodes,
+                nodes: 300_000,
+                ..SearchBudget::default()
+            },
+            nnue_budget: SearchBudget::default(),
+        }
+    }
+}
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     pub addr: String,
@@ -71,12 +189,11 @@ impl ServerConfig {
                     })?
                 }
                 "--nnue-mode" => {
-                    self.default_nnue.mode = crate::app::search::BudgetMode::parse(&value)
-                        .ok_or_else(|| {
-                            format!(
-                                "--nnue-mode 未知模式: {value}（可选 nodes / depth_nodes / time）"
-                            )
-                        })?
+                    self.default_nnue.mode = BudgetMode::parse(&value).ok_or_else(|| {
+                        format!(
+                            "--nnue-mode 未知模式: {value}（可选 nodes / depth_nodes / time）"
+                        )
+                    })?
                 }
                 "--nnue-depth" => {
                     self.default_nnue.depth = value
@@ -173,4 +290,110 @@ pub fn parse_variant(s: &str) -> Option<Variant> {
         .iter()
         .copied()
         .find(|v| v.as_str().eq_ignore_ascii_case(s))
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn budget_mode_parse() {
+        assert_eq!(BudgetMode::parse("nodes"), Some(BudgetMode::Nodes));
+        assert_eq!(
+            BudgetMode::parse("DepthNodes"),
+            Some(BudgetMode::DepthNodes)
+        );
+        assert_eq!(
+            BudgetMode::parse("depth+nodes"),
+            Some(BudgetMode::DepthNodes)
+        );
+        assert_eq!(BudgetMode::parse("time"), Some(BudgetMode::Time));
+        assert!(BudgetMode::parse("mcts").is_none());
+    }
+    #[test]
+    fn nodes_mode_uses_timeout_as_time_limit() {
+        let b = SearchBudget {
+            mode: BudgetMode::Nodes,
+            nodes: 5_000,
+            ..Default::default()
+        };
+        let cfg = b.to_search_config();
+        assert_eq!(cfg.node_budget, 5_000);
+        assert_eq!(cfg.max_depth, 64, "纯节点预算深度不限");
+        assert_eq!(cfg.time_limit_ms, 60_000, "硬超时兜底");
+    }
+    #[test]
+    fn depth_nodes_mode_applies_both() {
+        let b = SearchBudget {
+            mode: BudgetMode::DepthNodes,
+            nodes: 300_000,
+            depth: 6,
+            timeout_ms: 10_000,
+            ..Default::default()
+        };
+        let cfg = b.to_search_config();
+        assert_eq!(cfg.node_budget, 300_000);
+        assert_eq!(cfg.max_depth, 6);
+        assert_eq!(cfg.time_limit_ms, 10_000, "硬超时仍生效");
+    }
+    #[test]
+    fn time_mode_unlimits_nodes_and_caps_by_timeout() {
+        let b = SearchBudget {
+            mode: BudgetMode::Time,
+            time_ms: 3_000,
+            timeout_ms: 2_000,
+            ..Default::default()
+        };
+        let cfg = b.to_search_config();
+        assert_eq!(cfg.node_budget, u64::MAX, "用时模式节点不限");
+        assert_eq!(cfg.time_limit_ms, 2_000, "时间预算被硬超时钳制");
+        assert_eq!(cfg.max_depth, 64);
+    }
+    #[test]
+    fn clamped_rejects_zero() {
+        let b = SearchBudget {
+            mode: BudgetMode::DepthNodes,
+            nodes: 0,
+            depth: 0,
+            time_ms: 0,
+            timeout_ms: 0,
+        }
+        .clamped();
+        assert_eq!((b.nodes, b.depth, b.timeout_ms), (1, 1, 1));
+        assert_eq!(b.time_ms, 0, "time_ms 允许 0（= 仅超时控制）");
+    }
+    #[test]
+    fn engine_params_partial_update_clamps() {
+        let base = EngineParams::default();
+        let p = base.updated(
+            Some(0),
+            Some(SearchBudget {
+                nodes: 0,
+                depth: 0,
+                timeout_ms: 0,
+                ..Default::default()
+            }),
+            Some(SearchBudget {
+                nodes: 0,
+                depth: 0,
+                timeout_ms: 0,
+                ..Default::default()
+            }),
+        );
+        assert_eq!(p.mcts_sims, 1);
+        assert_eq!(p.engine_budget.nodes, 1);
+        assert_eq!(p.nnue_budget.nodes, 1);
+        assert_eq!(p.nnue_budget.depth, 1);
+        assert_eq!(p.nnue_budget.timeout_ms, 1);
+        let p = base.updated(
+            None,
+            Some(SearchBudget {
+                mode: BudgetMode::Nodes,
+                nodes: 500_000,
+                ..Default::default()
+            }),
+            None,
+        );
+        assert_eq!(p.engine_budget.nodes, 500_000);
+        assert_eq!(p.mcts_sims, base.mcts_sims);
+        assert_eq!(p.nnue_budget, base.nnue_budget);
+    }
 }

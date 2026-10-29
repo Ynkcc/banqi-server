@@ -1,11 +1,6 @@
 use banqi_core::core::env::MoveHistory;
 use banqi_core::core::env::types::{Piece, Player};
-pub fn player_label(p: Player) -> String {
-    match p {
-        Player::Red => "Red".to_string(),
-        Player::Black => "Black".to_string(),
-    }
-}
+pub use bqsrv_dto::player_label;
 #[derive(Debug, Clone)]
 pub struct HistoryEntry {
     pub ply: usize,

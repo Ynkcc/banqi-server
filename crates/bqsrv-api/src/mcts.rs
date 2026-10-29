@@ -1,7 +1,7 @@
-use crate::app::sync::{read_lock, write_lock};
-use crate::error::ApiError;
-use crate::mcts::{MctsEdge, MctsNodeBoard, MctsNodeDetail, MctsRootInfo};
-use crate::state::{
+use bqsrv_app::app::sync::{read_lock, write_lock};
+use bqsrv_dto::ApiError;
+use bqsrv_app::mcts::{MctsEdge, MctsNodeBoard, MctsNodeDetail, MctsRootInfo};
+use bqsrv_app::state::{
     SharedState, get_mut_session, get_session, mcts_tree_of, parse_game_id, parse_id,
     store_manual_search_trees,
 };
@@ -63,20 +63,20 @@ pub async fn search(
         let s = get_mut_session(&mut games, &id, game_id)?;
         let current = s.core.current.current_player;
         let slot = match s.slots.side(current) {
-            crate::app::player::PlayerSlot::Strategy {
+            bqsrv_app::app::player::PlayerSlot::Strategy {
                 kind,
                 model_file,
                 params,
-            } if kind.needs_model() => crate::app::player::PlayerSlot::Strategy {
+            } if kind.needs_model() => bqsrv_app::app::player::PlayerSlot::Strategy {
                 kind: *kind,
                 model_file: model_file.clone(),
                 params: *params,
             },
             _ => {
                 let model_file = app.resolve_model_file(None, s.core.variant)?;
-                crate::app::player::PlayerSlot::strategy(
-                    crate::app::player::StrategyKind::from_engine_kind(
-                        crate::app::models::EngineKind::from_model_file(&model_file),
+                bqsrv_app::app::player::PlayerSlot::strategy(
+                    bqsrv_app::app::player::StrategyKind::from_engine_kind(
+                        bqsrv_app::app::models::EngineKind::from_model_file(&model_file),
                     ),
                     Some(model_file),
                     app.params(),
@@ -88,7 +88,7 @@ pub async fn search(
     };
     let app2 = std::sync::Arc::clone(&app);
     let decision = tokio::task::spawn_blocking(move || {
-        crate::app::player::decide(&snap, &slot, prev_tree, &app2.models)
+        bqsrv_app::app::player::decide(&snap, &slot, prev_tree, &app2.models)
     })
     .await
     .map_err(|e| ApiError::Internal(format!("blocking 任务 join 失败: {e}")))?

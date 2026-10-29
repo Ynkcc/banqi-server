@@ -3,6 +3,7 @@ pub use banqi_core::core::env::outcome::{OverReason, over_reason};
 pub use banqi_core::core::env::projection::{BoardCell, BoardProjection, CellState, project};
 use banqi_core::core::env::types::{Piece, PieceType, Player};
 use banqi_core::core::env::{DarkChessEnv, PositionSnapshot};
+pub use bqsrv_dto::{ActionView, GameStateView};
 #[derive(Debug, Clone, Copy)]
 pub struct LocatedCell {
     pub index: usize,
@@ -10,13 +11,6 @@ pub struct LocatedCell {
     pub col: usize,
     pub state: CellState,
     pub piece: Option<Piece>,
-}
-#[derive(Debug, Clone, Copy)]
-pub struct ActionView {
-    pub action: usize,
-    pub from: usize,
-    pub to: usize,
-    pub is_chance: bool,
 }
 #[derive(Debug, Clone)]
 pub struct ScalarView {
@@ -101,24 +95,6 @@ pub fn game_view(core: &crate::app::session::SnapshotSession) -> GameView {
         history: history_entries(&core.history),
         undoable: core.undoable(),
     }
-}
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct GameStateView {
-    pub board: Vec<String>,
-    pub current_player: String,
-    pub move_counter: u32,
-    pub total_step_counter: u32,
-    pub dead_red: Vec<String>,
-    pub dead_black: Vec<String>,
-    pub hidden_red: Vec<String>,
-    pub hidden_black: Vec<String>,
-    pub action_masks: Vec<i32>,
-    pub reveal_probabilities: Vec<f32>,
-    pub bitboards: std::collections::HashMap<String, Vec<bool>>,
-    pub hp_red: i32,
-    pub hp_black: i32,
-    pub variant: String,
-    pub fen: String,
 }
 pub fn game_state_view(snap: &PositionSnapshot) -> GameStateView {
     use banqi_core::core::env::SnapshotEnv;

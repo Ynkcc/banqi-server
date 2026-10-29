@@ -1,3 +1,32 @@
+use banqi_core::core::env::error::EnvError;
+use std::fmt;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionError {
+    GameOver,
+    IllegalAction { action: usize },
+    BadRequest(String),
+    Internal(String),
+}
+impl fmt::Display for SessionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SessionError::GameOver => write!(f, "对局已结束"),
+            SessionError::IllegalAction { action } => write!(f, "无效动作: {action}"),
+            SessionError::BadRequest(s) => write!(f, "{s}"),
+            SessionError::Internal(s) => write!(f, "内部错误: {s}"),
+        }
+    }
+}
+impl std::error::Error for SessionError {}
+impl From<EnvError> for SessionError {
+    fn from(e: EnvError) -> Self {
+        match e {
+            EnvError::IllegalAction { action } => SessionError::IllegalAction { action },
+            EnvError::InvalidScenario { context } => SessionError::BadRequest(context.to_string()),
+            other => SessionError::Internal(other.to_string()),
+        }
+    }
+}
 use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -84,15 +113,13 @@ impl From<banqi_core::core::env::error::EnvError> for ApiError {
         }
     }
 }
-impl From<crate::app::session::SessionError> for ApiError {
-    fn from(e: crate::app::session::SessionError) -> Self {
+impl From<SessionError> for ApiError {
+    fn from(e: SessionError) -> Self {
         match e {
-            crate::app::session::SessionError::GameOver => ApiError::GameOver,
-            crate::app::session::SessionError::IllegalAction { action } => {
-                ApiError::IllegalAction { action }
-            }
-            crate::app::session::SessionError::BadRequest(s) => ApiError::BadRequest(s),
-            crate::app::session::SessionError::Internal(s) => ApiError::Internal(s),
+            SessionError::GameOver => ApiError::GameOver,
+            SessionError::IllegalAction { action } => ApiError::IllegalAction { action },
+            SessionError::BadRequest(s) => ApiError::BadRequest(s),
+            SessionError::Internal(s) => ApiError::Internal(s),
         }
     }
 }

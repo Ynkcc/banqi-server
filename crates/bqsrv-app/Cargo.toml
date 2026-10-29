@@ -1,0 +1,23 @@
+[package]
+name = "bqsrv-app"
+version.workspace = true
+edition.workspace = true
+description = "Banqi 对弈服务应用层：对局会话与状态、模型推理池、策略决策、搜索树视图与归档"
+
+[dependencies]
+bqsrv-config = { workspace = true }
+bqsrv-dto = { workspace = true }
+banqi-core = { workspace = true }
+banqi-engine = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }
+
+[features]
+default = []
+# 透传到底层推理库的 feature（与 banqi-engine 对齐）
+torch = ["banqi-engine/torch"]
+onnx = ["banqi-engine/onnx"]
+onnx-cuda = ["onnx", "banqi-engine/onnx-cuda"]

@@ -1,7 +1,7 @@
 use banqi_core::core::env::types::{Piece, PieceType, Player, Slot};
 use banqi_core::core::env::{PositionSnapshot, SnapshotEnv, Variant};
 
-use crate::dto::{
+use bqsrv_dto::{
     ArchivedGameDetail, HiddenBagDto, HistoryMoveView, ReplayResp, ReplayStepDto, describe_side,
     hex_decode, termination_label,
 };
@@ -10,7 +10,7 @@ pub const SOURCE_SNAPSHOT: &str = "snapshot";
 pub const SOURCE_REPLAY: &str = "replay";
 
 pub fn build_replay(detail: &ArchivedGameDetail) -> Result<ReplayResp, String> {
-    let variant = crate::config::parse_variant(&detail.summary.variant)
+    let variant = bqsrv_config::parse_variant(&detail.summary.variant)
         .ok_or_else(|| format!("未知变体: {}", detail.summary.variant))?;
     let positions = {
         let cfg = variant.config();
@@ -26,9 +26,8 @@ pub fn build_replay(detail: &ArchivedGameDetail) -> Result<ReplayResp, String> {
                     let bytes = hex_decode(hex).ok_or("快照 hex 非法")?;
                     PositionSnapshot::decode(&bytes)
                         .map_err(|e| format!("快照解码失败: {e}"))
-                        .map(|s| {
+                        .inspect(|s| {
                             debug_assert_eq!(s.slots.len(), positions, "快照槽位数应与变体一致");
-                            s
                         })
                 })
                 .collect::<Result<Vec<_>, String>>()
@@ -115,7 +114,7 @@ pub fn snapshot_at_ply(
     detail: &ArchivedGameDetail,
     ply: usize,
 ) -> Result<PositionSnapshot, String> {
-    let variant = crate::config::parse_variant(&detail.summary.variant)
+    let variant = bqsrv_config::parse_variant(&detail.summary.variant)
         .ok_or_else(|| format!("未知变体: {}", detail.summary.variant))?;
     let len = detail.moves.len();
     if len == 0 || ply == 0 {
@@ -278,9 +277,9 @@ mod tests {
             let action = *s.legal_actions().first().expect("未终局必有合法动作");
             s.apply_action(action).expect("合法动作应成功");
 
-            if s.core.history.records().len() % 2 == 0 {
-                s.capture_step_stats(crate::dto::StepStatsDto {
-                    mcts: Some(crate::dto::MctsStatsDto {
+            if s.core.history.records().len().is_multiple_of(2) {
+                s.capture_step_stats(bqsrv_dto::StepStatsDto {
+                    mcts: Some(bqsrv_dto::MctsStatsDto {
                         reused: false,
                         budget: 200,
                         actual_sims: 120,

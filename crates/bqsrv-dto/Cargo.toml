@@ -1,0 +1,15 @@
+[package]
+name = "bqsrv-dto"
+version.workspace = true
+edition.workspace = true
+description = "Banqi 对弈服务 API 契约层：请求/响应结构、错误枚举与各层共享的契约类型"
+
+[dependencies]
+bqsrv-config = { workspace = true }
+banqi-core = { workspace = true }
+banqi-engine = { workspace = true }
+axum = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

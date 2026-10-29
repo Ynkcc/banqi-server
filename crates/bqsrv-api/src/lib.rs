@@ -3,13 +3,14 @@ pub mod engine;
 pub mod games;
 pub mod mcts;
 pub mod nnue;
-use crate::dto::{
-    CapabilitiesResp, HealthResp, ModelEntryDto, ModelInfo, ModelListResp, SettingsReq,
+pub mod web;
+use bqsrv_app::feature_onnx;
+use bqsrv_app::feature_torch;
+use bqsrv_app::state::SharedState;
+use bqsrv_dto::{
+    ApiError, CapabilitiesResp, HealthResp, ModelEntryDto, ModelInfo, ModelListResp, SettingsReq,
     SettingsResp, VariantInfo, VariantsResp,
 };
-use crate::error::ApiError;
-use crate::state::SharedState;
-use crate::web;
 use axum::extract::{Request, State};
 use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::middleware::{self, Next};
@@ -110,7 +111,7 @@ pub fn router(state: SharedState) -> Router {
         .layer(middleware::from_fn(cors))
 }
 pub fn parse_variant_or_err(s: &str) -> Result<Variant, ApiError> {
-    crate::config::parse_variant(s).ok_or_else(|| {
+    bqsrv_config::parse_variant(s).ok_or_else(|| {
         ApiError::BadRequest(format!(
             "未知变体: {s}（可用: {}）",
             Variant::ALL
@@ -138,8 +139,8 @@ async fn health(State(app): State<SharedState>) -> Json<HealthResp> {
 }
 async fn capabilities() -> Json<CapabilitiesResp> {
     Json(CapabilitiesResp {
-        torch: cfg!(feature = "torch"),
-        onnx: cfg!(feature = "onnx"),
+        torch: feature_torch(),
+        onnx: feature_onnx(),
         nnue: true,
     })
 }
@@ -181,12 +182,12 @@ async fn variants() -> Json<VariantsResp> {
             .collect(),
     })
 }
-async fn scenarios() -> Json<crate::dto::ScenariosResp> {
-    Json(crate::dto::ScenariosResp {
+async fn scenarios() -> Json<bqsrv_dto::ScenariosResp> {
+    Json(bqsrv_dto::ScenariosResp {
         variants: Variant::ALL
             .iter()
             .copied()
-            .map(|v| crate::dto::VariantScenarios {
+            .map(|v| bqsrv_dto::VariantScenarios {
                 variant: v.as_str().to_string(),
                 scenarios: banqi_core::core::env::supported_scenario_infos(v),
             })

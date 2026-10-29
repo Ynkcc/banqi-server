@@ -5,11 +5,11 @@ use crate::app::player::{Agent, EngineParams, PlayerSlot, Slots, StrategyKind};
 use crate::app::search::{BudgetMode, SearchBudget};
 use crate::app::session::SnapshotSession;
 use crate::app::sync::{lock, read_lock, write_lock};
-use crate::config::ServerConfig;
-use crate::dto::{
+use bqsrv_config::ServerConfig;
+use bqsrv_dto::{
     ActionView, ArchivedGameDetail, GameStateResp, HistoryMoveView, SlotView, SlotsView, winner_str,
 };
-use crate::error::ApiError;
+use bqsrv_dto::ApiError;
 use banqi_core::core::env::DarkChessEnv;
 use banqi_core::core::env::{PositionSnapshot, Variant};
 use banqi_engine::nnue::NnueEvaluator;
@@ -30,7 +30,7 @@ pub struct GameSession {
     pub mcts_tree: Option<crate::mcts::MctsTreeBox>,
     pub expectimax_tree: Option<crate::app::expectimax_view::ExpectimaxTree>,
 
-    pub step_stats: Vec<Option<crate::dto::StepStatsDto>>,
+    pub step_stats: Vec<Option<bqsrv_dto::StepStatsDto>>,
 
     pub movers: Vec<Option<String>>,
 
@@ -126,7 +126,7 @@ impl GameSession {
         Ok(())
     }
 
-    pub fn capture_step_stats(&mut self, stats: crate::dto::StepStatsDto) {
+    pub fn capture_step_stats(&mut self, stats: bqsrv_dto::StepStatsDto) {
         let idx = self.core.history.records().len();
         if self.step_stats.len() + 1 < idx {
             self.step_stats.resize(idx - 1, None);
@@ -144,7 +144,6 @@ impl GameSession {
             action,
             self.core.is_chance_action(action),
         )
-        .into()
     }
     pub fn strategy_to_move(&self) -> bool {
         let (terminated, truncated, _) = self.over_state();
@@ -168,12 +167,7 @@ impl GameSession {
         let v = crate::app::view::game_view(&self.core);
         let s = &v.scalars;
         let over = s.terminated || s.truncated;
-        let legal_actions: Vec<ActionView> = v
-            .legal_actions
-            .iter()
-            .cloned()
-            .map(ActionView::from)
-            .collect();
+        let legal_actions: Vec<ActionView> = v.legal_actions.to_vec();
         let history: Vec<HistoryMoveView> = v
             .history
             .iter()
@@ -209,10 +203,10 @@ impl GameSession {
             can_undo: self.undoable(),
         }
     }
-    pub fn summary(&self, game_id: Uuid) -> crate::dto::GameSummary {
+    pub fn summary(&self, game_id: Uuid) -> bqsrv_dto::GameSummary {
         let (_, _, winner) = self.over_state();
         let v = self.view(game_id);
-        crate::dto::GameSummary {
+        bqsrv_dto::GameSummary {
             game_id: game_id.to_string(),
             variant: self.core.variant.as_str().to_string(),
             version: self.core.version,
@@ -235,7 +229,7 @@ impl GameSession {
         let mut step_stats = self.step_stats.clone();
         step_stats.resize(v.history.len(), None);
         ArchivedGameDetail {
-            summary: crate::dto::ArchivedGameSummary {
+            summary: bqsrv_dto::ArchivedGameSummary {
                 game_id: game_id.to_string(),
                 variant: self.core.variant.as_str().to_string(),
                 created_at: self.created_at,
@@ -253,7 +247,7 @@ impl GameSession {
                 .history
                 .records()
                 .iter()
-                .map(|r| crate::dto::ReplayActionDto {
+                .map(|r| bqsrv_dto::ReplayActionDto {
                     action: r.action,
                     revealed: r
                         .revealed
@@ -266,9 +260,9 @@ impl GameSession {
                 .history
                 .snapshots()
                 .iter()
-                .map(|s| crate::dto::hex_encode(&s.encode()))
+                .map(|s| bqsrv_dto::hex_encode(&s.encode()))
                 .collect(),
-            final_snapshot: Some(crate::dto::hex_encode(&self.core.current.encode())),
+            final_snapshot: Some(bqsrv_dto::hex_encode(&self.core.current.encode())),
             step_stats,
         }
     }
@@ -661,7 +655,7 @@ impl AppState {
     }
     pub fn slot_params(
         &self,
-        params: Option<&crate::dto::SlotParamsReq>,
+        params: Option<&bqsrv_dto::SlotParamsReq>,
     ) -> Result<EngineParams, ApiError> {
         let d = self.params();
         let Some(p) = params else {
@@ -830,7 +824,7 @@ impl AppState {
 mod tests {
     use super::*;
     use crate::app::sync::{read_lock, write_lock};
-    use crate::config::ServerConfig;
+    use bqsrv_config::ServerConfig;
     fn test_app() -> AppState {
         let cfg = ServerConfig {
             models_dir: std::env::temp_dir().join("banqi-server-test-no-models"),
@@ -879,7 +873,7 @@ mod tests {
     }
     #[test]
     fn apply_action_with_reveal_records_mover() {
-        use crate::dto::piece_from_display_code;
+        use bqsrv_dto::piece_from_display_code;
         let mut s = GameSession::new(Variant::DarkChess4x8, Slots::all_human());
         let flip = *s
             .legal_actions()

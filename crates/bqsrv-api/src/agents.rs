@@ -1,7 +1,7 @@
-use crate::app::player::{Agent, StrategyKind};
-use crate::dto::{AgentResp, AgentsListResp, CreateAgentReq, SlotParamsReq};
-use crate::error::ApiError;
-use crate::state::{SharedState, parse_id, strategy_slot_view};
+use bqsrv_app::app::player::{Agent, StrategyKind};
+use bqsrv_dto::{AgentResp, AgentsListResp, CreateAgentReq, SlotParamsReq};
+use bqsrv_dto::ApiError;
+use bqsrv_app::state::{SharedState, parse_id, strategy_slot_view};
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -20,7 +20,7 @@ pub async fn create_agent(
     State(app): State<SharedState>,
     Json(req): Json<CreateAgentReq>,
 ) -> Result<Json<AgentResp>, ApiError> {
-    let variant = crate::api::parse_variant_or_err(&req.variant)?;
+    let variant = crate::parse_variant_or_err(&req.variant)?;
     if req.kind.eq_ignore_ascii_case("human") {
         return Err(ApiError::BadRequest(
             "Agent 不能为 Human（Human 由对局槽位直接表达）".into(),
@@ -58,7 +58,7 @@ pub async fn create_agent(
     Ok(Json(agent_view(&agent)))
 }
 pub async fn list_agents(State(app): State<SharedState>) -> Json<AgentsListResp> {
-    let mut agents: Vec<AgentResp> = crate::app::sync::read_lock(&app.agents)
+    let mut agents: Vec<AgentResp> = bqsrv_app::app::sync::read_lock(&app.agents)
         .values()
         .map(agent_view)
         .collect();
@@ -80,7 +80,7 @@ pub async fn update_agent_settings(
     let id = parse_agent_id(&id)?;
     let new_params = app.slot_params(Some(&p))?;
     let agent = {
-        use crate::app::sync::write_lock;
+        use bqsrv_app::app::sync::write_lock;
         let mut agents = write_lock(&app.agents);
         let agent = agents
             .get_mut(&id)
