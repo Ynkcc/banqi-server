@@ -1,17 +1,19 @@
-use bqsrv_app::ai;
 use crate::parse_variant_or_err;
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
+use axum::Json;
+use banqi_core::core::env::PositionSnapshot;
+use bqsrv_app::ai;
 use bqsrv_app::app::player::{PlayerSlot, StrategyKind};
 use bqsrv_app::app::sync::{lock, read_lock, write_lock};
+use bqsrv_app::state::{
+    get_mut_session, get_session, parse_game_id, ArchivedGame, GameSession, SharedState,
+};
 use bqsrv_dto::{
     ApiError, ArchivedGameDetail, CreateGameReq, DryRunReq, GameCreatedResp, GameListResp,
     GameStateResp, MoveActionResp, MoveReq, MoveResp, PutSlotsReq, RecentGamesQuery,
     RecentGamesResp, ReplayGameReq, ReplayResp, SlotReq, SlotsReq, SuggestionResp, UndoReq,
 };
-use bqsrv_app::state::{GameSession, SharedState, get_mut_session, get_session, parse_game_id};
-use axum::Json;
-use axum::extract::{Path, State};
-use axum::http::StatusCode;
-use banqi_core::core::env::PositionSnapshot;
 use serde::Deserialize;
 use uuid::Uuid;
 async fn build_slot(
@@ -198,14 +200,7 @@ pub async fn move_piece(
     };
     Ok(Json(
         ai::human_move(
-            &app,
-            game_id,
-            &id,
-            req.action,
-            reveal,
-            req.mover,
-            req.note,
-            req.diag,
+            &app, game_id, &id, req.action, reveal, req.mover, req.note, req.diag,
         )
         .await?,
     ))
@@ -339,7 +334,7 @@ pub async fn undo(
     Ok(Json(MoveResp::new(s.view(game_id), Vec::new(), None, None)))
 }
 
-fn find_archived(app: &SharedState, id: &str) -> Result<ArchivedGameDetail, ApiError> {
+fn find_archived(app: &SharedState, id: &str) -> Result<ArchivedGame, ApiError> {
     lock(&app.recent)
         .iter()
         .find(|g| g.summary.game_id == id)
@@ -366,15 +361,18 @@ pub async fn get_recent_game(
     State(app): State<SharedState>,
     Path(id): Path<String>,
 ) -> Result<Json<ArchivedGameDetail>, ApiError> {
-    Ok(Json(find_archived(&app, &id)?))
+    let game = find_archived(&app, &id)?;
+
+    let detail = bqsrv_app::app::replay::to_detail(&game).map_err(ApiError::Internal)?;
+    Ok(Json(detail))
 }
 
 pub async fn replay_recent_game(
     State(app): State<SharedState>,
     Path(id): Path<String>,
 ) -> Result<Json<ReplayResp>, ApiError> {
-    let detail = find_archived(&app, &id)?;
-    let resp = bqsrv_app::app::replay::build_replay(&detail).map_err(ApiError::Internal)?;
+    let game = find_archived(&app, &id)?;
+    let resp = bqsrv_app::app::replay::build_replay(&game).map_err(ApiError::Internal)?;
     Ok(Json(resp))
 }
 
@@ -383,16 +381,15 @@ pub async fn replay_as_new_game(
     Path(id): Path<String>,
     req: Option<Json<ReplayGameReq>>,
 ) -> Result<Json<GameCreatedResp>, ApiError> {
-    let detail = find_archived(&app, &id)?;
-    let req = req.map(|Json(r)| r).unwrap_or(ReplayGameReq { slots: None, from_ply: None });
+    let game = find_archived(&app, &id)?;
+    let req = req.map(|Json(r)| r).unwrap_or(ReplayGameReq {
+        slots: None,
+        from_ply: None,
+    });
     let from_ply = req.from_ply.unwrap_or(0);
-    let snap = if from_ply > 0 {
-        bqsrv_app::app::replay::snapshot_at_ply(&detail, from_ply)
-            .map_err(ApiError::Internal)?
-    } else {
-        PositionSnapshot::from_fen(detail.initial_fen.trim())
-            .map_err(|e| ApiError::Internal(format!("归档初始局面解析失败: {e}")))?
-    };
+
+    let snap =
+        bqsrv_app::app::replay::snapshot_at_ply(&game, from_ply).map_err(ApiError::Internal)?;
     let variant = snap.variant;
     let (slots, slot_labels) = build_slots(&app, req.slots.as_ref(), variant).await?;
     let new_id = Uuid::new_v4();

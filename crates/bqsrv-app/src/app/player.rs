@@ -495,8 +495,8 @@ mod tests {
             nnue: d.nnue_stats.clone(),
             note: None,
         });
-        let detail = s.archived_detail(uuid::Uuid::new_v4(), 1_000);
-        let step = detail.step_stats[0]
+        let game = s.archived_game(uuid::Uuid::new_v4(), 1_000);
+        let step = game.step_stats[0]
             .as_ref()
             .and_then(|st| st.nnue.as_ref())
             .expect("规则策略步应带搜索统计");

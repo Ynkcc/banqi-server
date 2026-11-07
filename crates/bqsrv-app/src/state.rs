@@ -10,9 +10,8 @@ use banqi_core::core::env::{PositionSnapshot, Variant};
 use banqi_engine::nnue::NnueEvaluator;
 use bqsrv_config::ServerConfig;
 use bqsrv_dto::ApiError;
-use bqsrv_dto::{
-    winner_str, ActionView, ArchivedGameDetail, GameStateResp, HistoryMoveView, SlotView, SlotsView,
-};
+use bqsrv_dto::{winner_str, ActionView, GameStateResp, HistoryMoveView, SlotView, SlotsView};
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
@@ -210,17 +209,42 @@ impl GameSession {
         }
     }
 
-    pub fn archived_detail(&self, game_id: Uuid, finished_at: u64) -> ArchivedGameDetail {
+    pub fn archived_game(&self, game_id: Uuid, finished_at: u64) -> ArchivedGame {
         let v = self.view(game_id);
-        let initial_fen = self
-            .core
-            .history
-            .initial()
-            .map(|s| s.to_fen())
-            .unwrap_or_else(|| self.core.current.to_fen());
+        let records = self.core.history.records();
+        let snapshots = self.core.history.snapshots();
+        let steps = records.len();
+        let mut play = bq_record::GamePlay::default();
+        play.steps = steps as u32;
+        for r in records {
+            play.players.push(match r.player {
+                banqi_core::core::env::types::Player::Red => 1,
+                banqi_core::core::env::types::Player::Black => 0xFF,
+            });
+            play.actions
+                .extend_from_slice(&(r.action as u16).to_le_bytes());
+        }
+        play.snapshots = snapshots.iter().map(|s| s.encode()).collect();
+        let outcome = bq_record::GameOutcome {
+            winner: self.over_state().2,
+            termination_reason: from_server_over_reason(v.over_reason.as_deref()),
+            terminal_margin: None,
+            health_diff_red: None,
+        };
+        let mut record = bq_record::GameRecord::new(
+            self.core.variant.as_str(),
+            bq_record::RecordSource::SourceServer,
+        );
+        record.identity.as_mut().unwrap().game_id = Some(game_id.to_string());
+        record.play = Some(play);
+        record.outcome = Some(outcome);
+        record.timing = Some(bq_record::Timing {
+            created_at: self.created_at as i64,
+            finished_at: finished_at as i64,
+        });
         let mut step_stats = self.step_stats.clone();
-        step_stats.resize(v.history.len(), None);
-        ArchivedGameDetail {
+        step_stats.resize(steps, None);
+        ArchivedGame {
             summary: bqsrv_dto::ArchivedGameSummary {
                 game_id: game_id.to_string(),
                 variant: self.core.variant.as_str().to_string(),
@@ -232,32 +256,24 @@ impl GameSession {
                 over_reason: v.over_reason.clone(),
                 slots: v.slots,
             },
-            initial_fen,
-            final_fen: v.game.fen.clone(),
-            actions: self
-                .core
-                .history
-                .records()
-                .iter()
-                .map(|r| bqsrv_dto::ReplayActionDto {
-                    action: r.action,
-                    revealed: r
-                        .revealed
-                        .map(|p| banqi_core::core::env::piece_letter(p.piece_type, p.player)),
-                })
-                .collect(),
-            moves: v.history,
-            snapshots: self
-                .core
-                .history
-                .snapshots()
-                .iter()
-                .map(|s| bqsrv_dto::hex_encode(&s.encode()))
-                .collect(),
-            final_snapshot: Some(bqsrv_dto::hex_encode(&self.core.current.encode())),
             step_stats,
+            record,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchivedGame {
+    #[serde(flatten)]
+    pub summary: bqsrv_dto::ArchivedGameSummary,
+    pub step_stats: Vec<Option<bqsrv_dto::StepStatsDto>>,
+    pub record: bq_record::GameRecord,
+}
+
+pub fn from_server_over_reason(reason: Option<&str>) -> u32 {
+    use bq_record::termination::{as_u32, from_server_over_reason as contract_map};
+    reason.map(contract_map).map(as_u32).unwrap_or(0)
 }
 pub fn strategy_slot_view(
     kind: StrategyKind,
@@ -324,7 +340,7 @@ pub struct AppState {
     pub games: RwLock<HashMap<Uuid, GameSession>>,
     pub agents: RwLock<HashMap<Uuid, Agent>>,
 
-    pub recent: Mutex<VecDeque<ArchivedGameDetail>>,
+    pub recent: Mutex<VecDeque<ArchivedGame>>,
 }
 pub type SharedState = std::sync::Arc<AppState>;
 pub fn parse_id<T: std::str::FromStr>(raw: &str, label: &str) -> Result<T, ApiError> {
@@ -416,10 +432,10 @@ impl AppState {
         if !terminated && !truncated {
             return;
         }
-        let detail = s.archived_detail(game_id, unix_now());
-        self.persist_archive(&detail);
+        let game = s.archived_game(game_id, unix_now());
+        self.persist_archive(&game);
         let mut recent = lock(&self.recent);
-        recent.push_front(detail);
+        recent.push_front(game);
 
         while recent.len() > self.config.recent_games {
             match recent.pop_back() {
@@ -447,14 +463,17 @@ impl AppState {
                 return;
             }
         }
-        let mut detail = s.archived_detail(game_id, unix_now());
-        if !detail.summary.over {
-            detail.summary.over = true;
-            detail.summary.over_reason = Some("abandoned".to_string());
+        let mut game = s.archived_game(game_id, unix_now());
+        if !game.summary.over {
+            game.summary.over = true;
+            game.summary.over_reason = Some("abandoned".to_string());
+            if let Some(outcome) = game.record.outcome.as_mut() {
+                outcome.termination_reason = from_server_over_reason(Some("abandoned"));
+            }
         }
-        self.persist_archive(&detail);
+        self.persist_archive(&game);
         let mut recent = lock(&self.recent);
-        recent.push_front(detail);
+        recent.push_front(game);
         while recent.len() > self.config.recent_games {
             match recent.pop_back() {
                 Some(removed) => {
@@ -474,21 +493,21 @@ impl AppState {
             .map(|dir| dir.join(format!("{game_id}.json")))
     }
 
-    fn persist_archive(&self, detail: &ArchivedGameDetail) {
-        let Ok(game_id) = parse_game_id(&detail.summary.game_id) else {
+    fn persist_archive(&self, game: &ArchivedGame) {
+        let Ok(game_id) = parse_game_id(&game.summary.game_id) else {
             return;
         };
         let Some(path) = self.archive_file(game_id) else {
             return;
         };
         let write = || -> std::io::Result<()> {
-            let data = serde_json::to_string_pretty(detail)
+            let data = serde_json::to_string_pretty(game)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
 
             bq_util::atomic_write(&path, data.as_bytes())
         };
         if let Err(e) = write() {
-            tracing::warn!(archive = %detail.summary.game_id, "归档落盘失败（仅保留内存归档）: {e}");
+            tracing::warn!(archive = %game.summary.game_id, "归档落盘失败（仅保留内存归档）: {e}");
         }
     }
     fn remove_archive_file(&self, game_id: Uuid) {
@@ -508,14 +527,15 @@ impl AppState {
         if self.config.recent_games == 0 {
             return;
         }
-        let mut details: Vec<ArchivedGameDetail> = bq_util::load_json_dir(dir, "json")
+
+        let mut games: Vec<ArchivedGame> = bq_util::load_json_dir(dir, "json")
             .into_iter()
-            .map(|(_, detail)| detail)
+            .map(|(_, game)| game)
             .collect();
-        details.sort_by(|a, b| b.summary.finished_at.cmp(&a.summary.finished_at));
-        details.truncate(self.config.recent_games);
-        let count = details.len();
-        *(lock(&self.recent)) = details.into();
+        games.sort_by(|a, b| b.summary.finished_at.cmp(&a.summary.finished_at));
+        games.truncate(self.config.recent_games);
+        let count = games.len();
+        *(lock(&self.recent)) = games.into();
         if count > 0 {
             tracing::info!("已从 {dir:?} 加载 {count} 条历史归档");
         }
@@ -899,25 +919,133 @@ mod tests {
         };
         let app = AppState::new(mk_cfg());
         let s = GameSession::new(Variant::DarkChess4x8, Slots::all_human());
-        let details: Vec<ArchivedGameDetail> = (0..3)
+        let games: Vec<ArchivedGame> = (0..3)
             .map(|i| {
-                let d = s.archived_detail(Uuid::new_v4(), 1_000 + i);
-                app.persist_archive(&d);
-                d
+                let g = s.archived_game(Uuid::new_v4(), 1_000 + i);
+                app.persist_archive(&g);
+                g
             })
             .collect();
 
         app.load_archives();
         let recent = crate::app::sync::lock(&app.recent);
         assert_eq!(recent.len(), 2, "应按 recent_games 截断");
-        assert_eq!(recent[0].summary.game_id, details[2].summary.game_id);
-        assert_eq!(recent[0].snapshots.len(), details[2].snapshots.len());
-        assert_eq!(recent[0].final_snapshot, details[2].final_snapshot);
+        assert_eq!(recent[0].summary.game_id, games[2].summary.game_id);
+        assert_eq!(
+            recent[0].record.steps(),
+            games[2].record.steps(),
+            "record 分组往返应保持步数"
+        );
+        assert_eq!(
+            recent[0].record.play.as_ref().unwrap().snapshots.len(),
+            games[2].record.play.as_ref().unwrap().snapshots.len()
+        );
         drop(recent);
 
-        let oldest: Uuid = details[0].summary.game_id.parse().expect("uuid");
+        let oldest: Uuid = games[0].summary.game_id.parse().expect("uuid");
         app.remove_archive_file(oldest);
         assert!(!dir.join(format!("{oldest}.json")).exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn archive_disk_roundtrip_replays_without_regression() {
+        let dir = std::env::temp_dir().join(format!("banqi-arch-rt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mk_cfg = || ServerConfig {
+            models_dir: std::env::temp_dir().join("banqi-server-test-no-models"),
+            archive_dir: Some(dir.clone()),
+            recent_games: 8,
+            ..Default::default()
+        };
+        let app = AppState::new(mk_cfg());
+        let mut s = GameSession::new(Variant::DarkChess4x8, Slots::all_human());
+        for _ in 0..6 {
+            if s.over_state().0 || s.over_state().1 {
+                break;
+            }
+            let action = *s.legal_actions().first().expect("未终局必有合法动作");
+            s.apply_action(action).expect("合法动作应成功");
+        }
+        let game_id = Uuid::new_v4();
+        let game = s.archived_game(game_id, 2_000);
+        let steps = game.record.steps();
+        assert_eq!(steps, s.core.history.records().len());
+        assert_eq!(
+            game.record.play.as_ref().unwrap().players.len(),
+            steps,
+            "players 应与步数一一对应"
+        );
+        app.persist_archive(&game);
+
+        let app2 = AppState::new(mk_cfg());
+        app2.load_archives();
+        let loaded = crate::app::sync::lock(&app2.recent)[0].clone();
+        assert_eq!(loaded.summary.game_id, game.summary.game_id);
+        assert_eq!(loaded.record.steps(), steps);
+
+        let d1 = crate::app::replay::to_detail(&game).expect("内存归档派生 detail 应成功");
+        let d2 = crate::app::replay::to_detail(&loaded).expect("磁盘归档派生 detail 应成功");
+        assert_eq!(d1.initial_fen, d2.initial_fen);
+        assert_eq!(d1.final_fen, d2.final_fen);
+        assert_eq!(d1.moves.len(), d2.moves.len());
+        assert_eq!(d1.snapshots.len(), steps);
+        let r1 = crate::app::replay::build_replay(&game).expect("内存归档回放应成功");
+        let r2 = crate::app::replay::build_replay(&loaded).expect("磁盘归档回放应成功");
+        assert_eq!(r1.board_source, crate::app::replay::SOURCE_SNAPSHOT);
+        assert_eq!(r1.final_board, r2.final_board);
+        assert_eq!(r1.moves.len(), steps);
+
+        let mid = crate::app::replay::snapshot_at_ply(&loaded, 2).expect("中盘快照应可取");
+        assert_eq!(mid.slots.len(), 32);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_archive_without_record_is_ignored() {
+        let dir = std::env::temp_dir().join(format!("banqi-arch-legacy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("创建归档目录应成功");
+        let legacy = r#"{
+            "game_id": "00000000-0000-0000-0000-000000000001",
+            "variant": "dark_chess_4x8",
+            "created_at": 1,
+            "finished_at": 2,
+            "total_steps": 0,
+            "over": true,
+            "winner": "red",
+            "over_reason": "checkmate",
+            "initial_fen": "?",
+            "final_fen": "?",
+            "actions": [],
+            "moves": [],
+            "snapshots": [],
+            "final_snapshot": null,
+            "step_stats": []
+        }"#;
+        std::fs::write(dir.join("legacy.json"), legacy).expect("写旧格式归档应成功");
+
+        let app = AppState::new(ServerConfig {
+            models_dir: std::env::temp_dir().join("banqi-server-test-no-models"),
+            archive_dir: Some(dir.clone()),
+            recent_games: 4,
+            ..Default::default()
+        });
+        app.load_archives();
+        assert!(
+            crate::app::sync::lock(&app.recent).is_empty(),
+            "旧格式归档应被忽略"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn from_server_over_reason_maps_all_cases() {
+        assert_eq!(super::from_server_over_reason(Some("checkmate")), 1);
+        assert_eq!(super::from_server_over_reason(Some("draw")), 2);
+        assert_eq!(super::from_server_over_reason(Some("max_steps")), 3);
+        assert_eq!(super::from_server_over_reason(Some("abandoned")), 4);
+        assert_eq!(super::from_server_over_reason(None), 0);
+        assert_eq!(super::from_server_over_reason(Some("unknown")), 0);
     }
 }

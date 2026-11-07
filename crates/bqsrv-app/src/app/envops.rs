@@ -15,9 +15,24 @@ macro_rules! with_env {
 }
 pub use banqi_core::core::env::outcome::StepOutcome;
 pub fn initial_snapshot(variant: Variant) -> PositionSnapshot {
+    use banqi_core::core::env::seed::SeedableEnv;
     banqi_core::for_variant_env!(variant, E => {
-        <E as Default>::default().to_snapshot()
+        let mut env = <E as Default>::default();
+
+
+        SeedableEnv::set_seed(&mut env, unique_seed());
+        env.to_snapshot()
     })
+}
+
+fn unique_seed() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    nanos ^ COUNTER.fetch_add(1, Ordering::Relaxed).rotate_left(32)
 }
 pub fn initial_snapshot_with_scenario(
     variant: Variant,

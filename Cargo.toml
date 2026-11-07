@@ -22,6 +22,8 @@ banqi-engine = { path = "../banqi-engine" }
 bq-inference = { path = "../banqi-engine/crates/bq-inference" }
 bq-util = { path = "../banqi-core/crates/bq-util" }
 bq-replay = { path = "../banqi-core/crates/bq-replay" }
+# 共享对局记录契约层（game_record.proto 生成类型 + 回放输入转换）
+bq-record = { path = "../banqi-core/crates/bq-record" }
 # HTTP API
 axum = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }

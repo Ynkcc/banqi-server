@@ -9,6 +9,7 @@ bqsrv-config = { workspace = true }
 bqsrv-dto = { workspace = true }
 banqi-core = { workspace = true }
 bq-replay = { workspace = true }
+bq-record = { workspace = true }
 banqi-engine = { workspace = true }
 bq-util = { workspace = true, features = ["tokio"] }
 tokio = { workspace = true }
