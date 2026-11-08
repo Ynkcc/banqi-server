@@ -71,6 +71,28 @@ fn node_player(node: &ExNode) -> String {
         .map(|e| player_label(e.get_current_player()))
         .unwrap_or_else(|| "Unknown".into())
 }
+
+fn chance_node_flag(tree: &ExTree, id: usize) -> Option<BoundFlag> {
+    let mut flags = tree
+        .nodes
+        .iter()
+        .filter(|c| c.parent == Some(id))
+        .map(|c| c.flag);
+    let first = flags.next()?;
+    Some(if flags.all(|f| f == first) {
+        first
+    } else {
+        BoundFlag::Unknown
+    })
+}
+
+fn display_flag(tree: &ExTree, n: &ExNode, id: usize) -> BoundFlag {
+    if n.is_chance && !n.is_outcome {
+        chance_node_flag(tree, id).unwrap_or(n.flag)
+    } else {
+        n.flag
+    }
+}
 fn node_summary(tree: &ExTree, id: usize) -> ExNodeSummary {
     let n = &tree.nodes[id];
     let is_flip = n
@@ -85,7 +107,7 @@ fn node_summary(tree: &ExTree, id: usize) -> ExNodeSummary {
         alpha: n.alpha,
         beta: n.beta,
         depth: n.depth,
-        flag: flag_label(n.flag),
+        flag: flag_label(display_flag(tree, n, id)),
         mark: mark_label(n.mark),
         is_chance: n.is_chance,
         is_outcome: n.is_outcome,
@@ -130,7 +152,7 @@ pub fn ex_edge_list(tree: &ExTree, node_id: usize) -> Vec<ExEdge> {
                 .map(|v| crate::app::envops::is_flip_action(v, c.action))
                 .unwrap_or(false),
             depth: c.depth,
-            flag: flag_label(c.flag),
+            flag: flag_label(display_flag(tree, c, child_id)),
             mark: mark_label(c.mark),
             child_count: tree
                 .nodes
@@ -217,7 +239,14 @@ mod tests {
         n3.is_outcome = true;
         n3.chance_prob = 0.25;
         n3.value = 0.1;
+        n3.flag = BoundFlag::Upper;
         t.nodes.push(n3);
+        let mut n4 = sample_node(Some(2));
+        n4.is_outcome = true;
+        n4.chance_prob = 0.5;
+        n4.value = -0.2;
+        n4.flag = BoundFlag::Upper;
+        t.nodes.push(n4);
         t
     }
     fn sample_node(parent: Option<usize>) -> ExNode {
@@ -250,8 +279,8 @@ mod tests {
         assert_eq!(tt_edge.flag, "lower");
         assert_eq!(tt_edge.mark.as_deref(), Some("tt"));
         let outcome = ex_edge_list(&t, 2);
-        assert_eq!(outcome.len(), 1);
-        assert!(outcome[0].is_outcome);
+        assert_eq!(outcome.len(), 2);
+        assert!(outcome.iter().all(|e| e.is_outcome));
         assert!((outcome[0].chance_prob - 0.25).abs() < 1e-6);
     }
     #[test]
@@ -264,10 +293,29 @@ mod tests {
         );
     }
     #[test]
+    fn chance_node_flag_aggregates_outcome_flags() {
+        let mut t = sample_tree();
+
+        assert_eq!(node_summary(&t, 2).flag, "upper");
+        assert_eq!(
+            ex_edge_list(&t, 0)
+                .iter()
+                .find(|e| e.child_id == 2)
+                .unwrap()
+                .flag,
+            "upper"
+        );
+
+        t.nodes[4].flag = BoundFlag::Lower;
+        assert_eq!(node_summary(&t, 2).flag, "unknown");
+
+        assert_eq!(node_summary(&t, 1).flag, "lower");
+    }
+    #[test]
     fn tree_stats_counts_depth() {
         let t = sample_tree();
         let (nodes, max_depth) = ex_tree_stats(&t);
-        assert_eq!(nodes, 4);
+        assert_eq!(nodes, 5);
         assert_eq!(max_depth, 2);
     }
 }
