@@ -330,6 +330,8 @@ pub struct ExNodeSummary {
     pub mark: Option<String>,
     pub is_chance: bool,
     pub is_outcome: bool,
+
+    pub is_flip: bool,
     pub chance_prob: f32,
     pub is_root: bool,
     pub is_null_probe: bool,

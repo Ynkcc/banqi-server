@@ -14,6 +14,8 @@ pub struct ExEdge {
     pub is_chance: bool,
     pub chance_prob: f32,
     pub is_outcome: bool,
+
+    pub is_flip: bool,
     pub depth: i32,
     pub flag: String,
     pub mark: Option<String>,
@@ -71,6 +73,11 @@ fn node_player(node: &ExNode) -> String {
 }
 fn node_summary(tree: &ExTree, id: usize) -> ExNodeSummary {
     let n = &tree.nodes[id];
+    let is_flip = n
+        .env
+        .as_ref()
+        .map(|e| crate::app::envops::is_flip_action(e.to_snapshot().variant, n.action))
+        .unwrap_or(false);
     ExNodeSummary {
         id,
         action: n.action,
@@ -82,6 +89,7 @@ fn node_summary(tree: &ExTree, id: usize) -> ExNodeSummary {
         mark: mark_label(n.mark),
         is_chance: n.is_chance,
         is_outcome: n.is_outcome,
+        is_flip,
         chance_prob: n.chance_prob,
         is_root: n.action == banqi_core::core::expectimax::tree::ROOT_ACTION,
         is_null_probe: n.action == banqi_core::core::expectimax::tree::NULL_ACTION,
@@ -101,6 +109,12 @@ pub fn ex_root_info(t: &ExpectimaxTree) -> Option<ExRootInfo> {
     })
 }
 pub fn ex_edge_list(tree: &ExTree, node_id: usize) -> Vec<ExEdge> {
+    let variant = tree
+        .nodes
+        .get(node_id)
+        .and_then(|n| n.env.as_ref())
+        .or_else(|| tree.nodes.iter().find_map(|n| n.env.as_ref()))
+        .map(|e| e.to_snapshot().variant);
     tree.nodes
         .iter()
         .enumerate()
@@ -112,6 +126,9 @@ pub fn ex_edge_list(tree: &ExTree, node_id: usize) -> Vec<ExEdge> {
             is_chance: c.is_chance,
             chance_prob: c.chance_prob,
             is_outcome: c.is_outcome,
+            is_flip: variant
+                .map(|v| crate::app::envops::is_flip_action(v, c.action))
+                .unwrap_or(false),
             depth: c.depth,
             flag: flag_label(c.flag),
             mark: mark_label(c.mark),
