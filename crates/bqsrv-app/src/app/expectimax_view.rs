@@ -2,8 +2,8 @@ use crate::app::common::player_label;
 use crate::app::search::NnueSearchStats;
 use banqi_core::core::env::{DarkChessEnv, SnapshotEnv};
 use banqi_core::core::expectimax::{BoundFlag, ExNode, ExTree};
-use serde::Serialize;
 pub use bqsrv_dto::{ExNodeSummary, ExRootInfo, ExSearchStats};
+use serde::Serialize;
 use ts_rs::TS;
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
@@ -18,12 +18,26 @@ pub struct ExEdge {
     pub flag: String,
     pub mark: Option<String>,
     pub child_count: usize,
+
+    pub spent_nodes: u64,
 }
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
 pub struct ExNodeBoard {
     pub state: crate::app::view::GameStateView,
     pub move_coords: Vec<usize>,
+
+    pub chance_outcomes: Vec<ExChanceOutcome>,
+}
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct ExChanceOutcome {
+    pub child_id: usize,
+    pub prob: f32,
+
+    pub value: f32,
+
+    pub revealed: Option<String>,
 }
 #[derive(Debug, Clone)]
 pub struct ExpectimaxTree {
@@ -73,6 +87,7 @@ fn node_summary(tree: &ExTree, id: usize) -> ExNodeSummary {
         is_null_probe: n.action == banqi_core::core::expectimax::tree::NULL_ACTION,
         player: node_player(n),
         child_count: tree.nodes.iter().filter(|c| c.parent == Some(id)).count(),
+        spent_nodes: n.spent_nodes,
     }
 }
 pub fn ex_root_info(t: &ExpectimaxTree) -> Option<ExRootInfo> {
@@ -105,6 +120,7 @@ pub fn ex_edge_list(tree: &ExTree, node_id: usize) -> Vec<ExEdge> {
                 .iter()
                 .filter(|n| n.parent == Some(child_id))
                 .count(),
+            spent_nodes: c.spent_nodes,
         })
         .collect()
 }
@@ -112,14 +128,63 @@ pub fn ex_node_summary(tree: &ExTree, node_id: usize) -> Option<ExNodeSummary> {
     tree.nodes.get(node_id).map(|_| node_summary(tree, node_id))
 }
 pub fn ex_node_board(tree: &ExTree, node_id: usize) -> Option<ExNodeBoard> {
-    let env: &DarkChessEnv = tree.nodes.get(node_id)?.env.as_ref()?;
+    let n = tree.nodes.get(node_id)?;
+    let env: &DarkChessEnv = n.env.as_ref()?;
     let snap = env.to_snapshot();
-    let move_coords = (snap.last_action >= 0)
-        .then_some(snap.last_action as usize)
-        .and_then(|a| crate::app::envops::coords_for_action(snap.variant, a))
-        .unwrap_or_default();
+
+    let move_coords = if n.is_chance {
+        (n.action != banqi_core::core::expectimax::tree::ROOT_ACTION
+            && n.action != banqi_core::core::expectimax::tree::NULL_ACTION)
+            .then(|| crate::app::envops::coords_for_action(snap.variant, n.action))
+            .flatten()
+            .unwrap_or_default()
+    } else {
+        (snap.last_action >= 0)
+            .then_some(snap.last_action as usize)
+            .and_then(|a| crate::app::envops::coords_for_action(snap.variant, a))
+            .unwrap_or_default()
+    };
     let state = crate::app::view::game_state_view(&snap);
-    Some(ExNodeBoard { state, move_coords })
+    let chance_outcomes = if n.is_chance {
+        chance_outcomes(tree, node_id, &state.board, &move_coords)
+    } else {
+        Vec::new()
+    };
+    Some(ExNodeBoard {
+        state,
+        move_coords,
+        chance_outcomes,
+    })
+}
+
+fn chance_outcomes(
+    tree: &ExTree,
+    node_id: usize,
+    board: &[String],
+    coords: &[usize],
+) -> Vec<ExChanceOutcome> {
+    tree.nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.parent == Some(node_id))
+        .map(|(child_id, c)| {
+            let revealed = c.env.as_ref().and_then(|cenv| {
+                let csnap = cenv.to_snapshot();
+                let cboard = crate::app::view::game_state_view(&csnap).board;
+                coords.iter().rev().find_map(|sq| {
+                    let old = board.get(*sq)?;
+                    let new = cboard.get(*sq)?;
+                    (old != new && new != "Hidden").then(|| new.clone())
+                })
+            });
+            ExChanceOutcome {
+                child_id,
+                prob: c.chance_prob,
+                value: -c.value,
+                revealed,
+            }
+        })
+        .collect()
 }
 pub use banqi_core::core::expectimax::ex_tree_stats;
 #[cfg(test)]
@@ -161,6 +226,7 @@ mod tests {
             flag: BoundFlag::Exact,
             mark: None,
             env: None,
+            spent_nodes: 0,
         }
     }
     #[test]

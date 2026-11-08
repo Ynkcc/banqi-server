@@ -335,6 +335,8 @@ pub struct ExNodeSummary {
     pub is_null_probe: bool,
     pub player: String,
     pub child_count: usize,
+
+    pub spent_nodes: u64,
 }
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
