@@ -163,7 +163,7 @@ pub fn ex_node_board(tree: &ExTree, node_id: usize) -> Option<ExNodeBoard> {
     };
     let state = crate::app::view::game_state_view(&snap);
     let chance_outcomes = if n.is_chance {
-        chance_outcomes(tree, node_id, &state.board, &move_coords)
+        chance_outcomes(tree, node_id)
     } else {
         Vec::new()
     };
@@ -174,26 +174,17 @@ pub fn ex_node_board(tree: &ExTree, node_id: usize) -> Option<ExNodeBoard> {
     })
 }
 
-fn chance_outcomes(
-    tree: &ExTree,
-    node_id: usize,
-    board: &[String],
-    coords: &[usize],
-) -> Vec<ExChanceOutcome> {
+fn chance_outcomes(tree: &ExTree, node_id: usize) -> Vec<ExChanceOutcome> {
     tree.nodes
         .iter()
         .enumerate()
         .filter(|(_, c)| c.parent == Some(node_id))
         .map(|(child_id, c)| {
-            let revealed = c.env.as_ref().and_then(|cenv| {
-                let csnap = cenv.to_snapshot();
-                let cboard = crate::app::view::game_state_view(&csnap).board;
-                coords.iter().rev().find_map(|sq| {
-                    let old = board.get(*sq)?;
-                    let new = cboard.get(*sq)?;
-                    (old != new && new != "Hidden").then(|| new.clone())
-                })
-            });
+            let revealed = c
+                .env
+                .as_ref()
+                .and_then(|cenv| cenv.last_revealed_piece())
+                .map(|p| p.short_name().to_string());
             ExChanceOutcome {
                 child_id,
                 prob: c.chance_prob,
