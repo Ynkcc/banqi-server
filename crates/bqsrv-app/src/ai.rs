@@ -1,17 +1,17 @@
 use crate::app::mcts_view::mcts_stats_from_session;
 use crate::app::player::{self, PlayerSlot, StrategyKind};
 use crate::app::sync::{read_lock, write_lock};
-use bqsrv_dto::{
-    AppliedAction, DryRunReq, GameStateResp, MctsStatsDto, MoveResp, NnueStatsDto, SuggestionResp,
-    player_str,
-};
-use bqsrv_dto::ApiError;
-use crate::nnue::{ExRootInfo, ex_root_info};
+use crate::nnue::{ex_root_info, ExRootInfo};
 use crate::state::{
-    AppState, SharedState, get_mut_session, get_session, store_manual_search_trees,
+    get_mut_session, get_session, store_manual_search_trees, AppState, SharedState,
 };
 use banqi_core::core::env::types::Slot;
 use banqi_core::core::env::{DarkChessEnv, PositionSnapshot};
+use bqsrv_dto::ApiError;
+use bqsrv_dto::{
+    player_str, AppliedAction, DryRunReq, GameStateResp, MctsStatsDto, MoveResp, NnueStatsDto,
+    SuggestionResp,
+};
 use std::sync::Arc;
 use uuid::Uuid;
 struct TurnPlan {
@@ -185,7 +185,7 @@ pub async fn human_move(
     note: Option<String>,
     diag: Option<bqsrv_dto::StepStatsDto>,
 ) -> Result<MoveResp, ApiError> {
-    let (mut state, mover, human_view, strategy_version) = {
+    let (state, mover, human_view) = {
         let mut games = write_lock(&app.games);
         let s = get_mut_session(&mut games, id, game_id)?;
         let mover = s.core.current.current_player;
@@ -221,32 +221,13 @@ pub async fn human_move(
             outcome.winner
         );
         let state = s.view(game_id);
-        let strategy_version = s.strategy_to_move().then_some(s.core.version);
-        (state, mover, human_view, strategy_version)
+        (state, mover, human_view)
     };
-    let mut actions = vec![AppliedAction {
+    let actions = vec![AppliedAction {
         player: player_str(mover),
         action: human_view,
     }];
-    let mut mcts_stats = None;
-    let mut nnue_stats = None;
-    if let Some(version) = strategy_version {
-        match run_strategy_turn(app, game_id, version, None).await? {
-            Some((new_state, strategy_action, m, n)) => {
-                actions.push(strategy_action);
-                mcts_stats = m;
-                nnue_stats = n;
-                state = new_state;
-            }
-            None => {
-                let games = read_lock(&app.games);
-                if let Some(s) = games.get(&game_id) {
-                    state = s.view(game_id);
-                }
-            }
-        }
-    }
-    Ok(MoveResp::new(state, actions, mcts_stats, nnue_stats))
+    Ok(MoveResp::new(state, actions, None, None))
 }
 
 pub async fn manual_expectimax_search(
@@ -356,8 +337,9 @@ pub async fn run_dry_run(
                     PlayerSlot::Human => {
                         let kind = match req.kind.as_deref() {
                             None | Some("") => StrategyKind::Expectimax,
-                            Some(k) => StrategyKind::parse(k)
-                                .ok_or_else(|| ApiError::BadRequest(StrategyKind::invalid_kind_msg(k)))?,
+                            Some(k) => StrategyKind::parse(k).ok_or_else(|| {
+                                ApiError::BadRequest(StrategyKind::invalid_kind_msg(k))
+                            })?,
                         };
                         let params = app.slot_params(req.params.as_ref())?;
                         let model_file = if kind.needs_model() {
@@ -373,10 +355,9 @@ pub async fn run_dry_run(
         (s.core.current.clone(), s.core.version, hint_slot)
     };
     let app2 = Arc::clone(app);
-    let decision = crate::app::common::blocking(move || {
-        player::dry_run(&snap, &hint_slot, &app2.models)
-    })
-    .await?;
+    let decision =
+        crate::app::common::blocking(move || player::dry_run(&snap, &hint_slot, &app2.models))
+            .await?;
     let mut games = write_lock(&app.games);
     let s = get_mut_session(&mut games, &game_id.to_string(), game_id)?;
     let player = s.core.current.current_player;
