@@ -45,7 +45,6 @@ pub fn expectimax_search_tree(
     cfg.nnue_evaluator = Some(evaluator);
     cfg.threads = 1;
     cfg.features &= !FEAT_ASP;
-    cfg.collect_tree = true;
     let started = Instant::now();
     let SearchResult {
         action,

@@ -323,11 +323,23 @@ pub struct ExNodeSummary {
     pub id: usize,
     pub action: usize,
     pub value: f32,
-    pub alpha: f32,
-    pub beta: f32,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub exp_value: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub exp_lower: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub exp_upper: Option<f32>,
     pub depth: i32,
     pub flag: String,
     pub mark: Option<String>,
+
+    pub pruned: bool,
+
+    pub prune_reason: Option<String>,
     pub is_chance: bool,
     pub is_outcome: bool,
 
