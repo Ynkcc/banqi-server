@@ -18,16 +18,16 @@ fn nnue_stats_from(
         engine,
         mode: budget.mode.as_str(),
         depth: if budget.mode == BudgetMode::DepthNodes {
-            cfg.max_depth
+            cfg.budget.max_depth
         } else {
             0
         },
         budget: if budget.mode != BudgetMode::Time {
-            cfg.node_budget
+            cfg.budget.node_budget
         } else {
             0
         },
-        time_limit_ms: cfg.time_limit_ms,
+        time_limit_ms: cfg.budget.time_limit_ms,
         nodes,
         reached_depth,
         elapsed_ms,
@@ -42,8 +42,8 @@ pub fn expectimax_search_tree(
 ) -> Result<(usize, crate::app::expectimax_view::ExpectimaxTree), String> {
     let budget = budget.clamped();
     let mut cfg = budget.to_search_config();
-    cfg.nnue_evaluator = Some(evaluator);
-    cfg.threads = 1;
+    cfg.res.nnue_evaluator = Some(evaluator);
+    cfg.budget.threads = 1;
     cfg.features &= !FEAT_ASP;
     let started = Instant::now();
     let SearchResult {

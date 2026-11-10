@@ -59,15 +59,15 @@ impl SearchBudget {
     pub fn to_search_config(&self) -> SearchConfig {
         let mut cfg = SearchConfig::default();
         let timeout = self.timeout_ms.max(1);
-        cfg.time_limit_ms = match self.mode {
+        cfg.budget.time_limit_ms = match self.mode {
             BudgetMode::Time if self.time_ms > 0 => self.time_ms.min(timeout),
             _ => timeout,
         };
-        cfg.node_budget = match self.mode {
+        cfg.budget.node_budget = match self.mode {
             BudgetMode::Time => u64::MAX,
             _ => self.nodes.max(1),
         };
-        cfg.max_depth = match self.mode {
+        cfg.budget.max_depth = match self.mode {
             BudgetMode::DepthNodes => self.depth.max(1),
             _ => 64,
         };
@@ -312,9 +312,9 @@ mod tests {
             ..Default::default()
         };
         let cfg = b.to_search_config();
-        assert_eq!(cfg.node_budget, 5_000);
-        assert_eq!(cfg.max_depth, 64, "纯节点预算深度不限");
-        assert_eq!(cfg.time_limit_ms, 60_000, "硬超时兜底");
+        assert_eq!(cfg.budget.node_budget, 5_000);
+        assert_eq!(cfg.budget.max_depth, 64, "纯节点预算深度不限");
+        assert_eq!(cfg.budget.time_limit_ms, 60_000, "硬超时兜底");
     }
     #[test]
     fn depth_nodes_mode_applies_both() {
@@ -326,9 +326,9 @@ mod tests {
             ..Default::default()
         };
         let cfg = b.to_search_config();
-        assert_eq!(cfg.node_budget, 300_000);
-        assert_eq!(cfg.max_depth, 6);
-        assert_eq!(cfg.time_limit_ms, 10_000, "硬超时仍生效");
+        assert_eq!(cfg.budget.node_budget, 300_000);
+        assert_eq!(cfg.budget.max_depth, 6);
+        assert_eq!(cfg.budget.time_limit_ms, 10_000, "硬超时仍生效");
     }
     #[test]
     fn time_mode_unlimits_nodes_and_caps_by_timeout() {
@@ -339,9 +339,9 @@ mod tests {
             ..Default::default()
         };
         let cfg = b.to_search_config();
-        assert_eq!(cfg.node_budget, u64::MAX, "用时模式节点不限");
-        assert_eq!(cfg.time_limit_ms, 2_000, "时间预算被硬超时钳制");
-        assert_eq!(cfg.max_depth, 64);
+        assert_eq!(cfg.budget.node_budget, u64::MAX, "用时模式节点不限");
+        assert_eq!(cfg.budget.time_limit_ms, 2_000, "时间预算被硬超时钳制");
+        assert_eq!(cfg.budget.max_depth, 64);
     }
     #[test]
     fn clamped_rejects_zero() {
