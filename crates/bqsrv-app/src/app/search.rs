@@ -1,6 +1,6 @@
 use banqi_core::core::env::DarkChessEnv;
 use banqi_core::core::expectimax::nnue::NnueEvaluate;
-use banqi_core::core::expectimax::{FEAT_ASP, SearchConfig, SearchResult};
+use banqi_core::core::expectimax::{SearchConfig, SearchResult};
 use banqi_engine::nnue::NnueEvaluator;
 use std::sync::Arc;
 use std::time::Instant;
@@ -44,7 +44,7 @@ pub fn expectimax_search_tree(
     let mut cfg = budget.to_search_config();
     cfg.res.nnue_evaluator = Some(evaluator);
     cfg.budget.threads = 1;
-    cfg.features &= !FEAT_ASP;
+    cfg.root.aspiration = false;
     let started = Instant::now();
     let SearchResult {
         action,
