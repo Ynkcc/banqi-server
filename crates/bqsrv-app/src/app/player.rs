@@ -460,6 +460,9 @@ mod tests {
         assert!(legal.contains(&d.action));
         assert!(d.score.is_some(), "Expectimax 决策应携带根评估值");
         assert!(d.ex_tree.is_some(), "Expectimax 决策应携带搜索树");
+        let tree = d.ex_tree.as_ref().expect("非空");
+        assert!(!tree.tree.nodes.is_empty(), "搜索树必须实际记录了节点");
+        assert!(tree.tree.root.is_some(), "搜索树必须有根节点");
         let stats = d.nnue_stats.expect("Expectimax 决策应携带搜索统计");
         assert_eq!(stats.engine, "rule");
         assert_eq!(stats.mode, "nodes");

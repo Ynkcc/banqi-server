@@ -2,10 +2,10 @@ use banqi_core::core::env::DarkChessEnv;
 use banqi_core::core::expectimax::nnue::NnueEvaluate;
 use banqi_core::core::expectimax::{SearchConfig, SearchResult};
 use banqi_engine::nnue::NnueEvaluator;
-use std::sync::Arc;
-use std::time::Instant;
 pub use bqsrv_config::{BudgetMode, SearchBudget};
 pub use bqsrv_dto::NnueSearchStats;
+use std::sync::Arc;
+use std::time::Instant;
 fn nnue_stats_from(
     engine: &'static str,
     budget: &SearchBudget,
@@ -45,6 +45,8 @@ pub fn expectimax_search_tree(
     cfg.res.nnue_evaluator = Some(evaluator);
     cfg.budget.threads = 1;
     cfg.root.aspiration = false;
+
+    cfg.root.chance_exp = true;
     let started = Instant::now();
     let SearchResult {
         action,

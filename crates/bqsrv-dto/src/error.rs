@@ -51,7 +51,7 @@ pub enum ApiError {
     HumanTurn,
     #[error("暂无 MCTS 搜索树：等待 AI 走子或 POST /mcts/search")]
     MctsTreeMissing,
-    #[error("暂无 Expectimax 搜索树：等待 NNUE 对手走子或 POST /nnue/search")]
+    #[error("暂无 Expectimax 搜索树：等待对手（规则 / NNUE）走子或 POST /nnue/search")]
     NnueTreeMissing,
     #[error("{0}")]
     BadRequest(String),

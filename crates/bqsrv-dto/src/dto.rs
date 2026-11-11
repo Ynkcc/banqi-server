@@ -309,6 +309,7 @@ pub struct SlotsView {
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
 pub struct ExSearchStats {
+    pub engine: String,
     pub mode: String,
     pub depth: i32,
     pub budget: u64,
@@ -500,6 +501,7 @@ impl From<&NnueSearchStats> for NnueStatsDto {
 impl From<&NnueSearchStats> for ExSearchStats {
     fn from(s: &NnueSearchStats) -> Self {
         Self {
+            engine: s.engine.to_string(),
             mode: s.mode.to_string(),
             depth: s.depth,
             budget: s.budget,
