@@ -875,11 +875,27 @@ pub struct CannonStrikeGeneralTs {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, TS)]
+#[ts(export, rename = "AdjacentGenerals")]
+pub struct AdjacentGeneralsTs {
+    pub red_sq: Option<usize>,
+    pub black_sq: Option<usize>,
+    pub random_reveals: usize,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS)]
+#[ts(export, rename = "RandomReveals")]
+pub struct RandomRevealsTs {
+    pub count: usize,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS)]
 #[ts(export, rename = "OpeningScenario")]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OpeningScenarioTs {
     CannonStrikeGeneral(CannonStrikeGeneralTs),
+    AdjacentGenerals(AdjacentGeneralsTs),
     AllRevealed(AllRevealedTs),
+    RandomReveals(RandomRevealsTs),
 }
 
 pub fn player_label(p: banqi_core::core::env::types::Player) -> String {
@@ -999,5 +1015,22 @@ mod dto_tests {
         let json = serde_json::to_value(all).expect("序列化应成功");
         let mirror: OpeningScenarioTs = serde_json::from_value(json).expect("反序列化应成功");
         assert!(matches!(mirror, OpeningScenarioTs::AllRevealed(_)));
+        let adj = banqi_core::core::env::OpeningScenario::adjacent_generals();
+        let json = serde_json::to_value(adj).expect("序列化应成功");
+        assert_eq!(
+            json.get("kind").and_then(|k| k.as_str()),
+            Some("adjacent_generals")
+        );
+        let mirror: OpeningScenarioTs = serde_json::from_value(json).expect("反序列化应成功");
+        assert!(matches!(mirror, OpeningScenarioTs::AdjacentGenerals(_)));
+        let rr = banqi_core::core::env::OpeningScenario::random_reveals(7);
+        let json = serde_json::to_value(rr).expect("序列化应成功");
+        assert_eq!(
+            json.get("kind").and_then(|k| k.as_str()),
+            Some("random_reveals")
+        );
+        assert_eq!(json.get("count").and_then(|c| c.as_u64()), Some(7));
+        let mirror: OpeningScenarioTs = serde_json::from_value(json).expect("反序列化应成功");
+        assert!(matches!(mirror, OpeningScenarioTs::RandomReveals(_)));
     }
 }
