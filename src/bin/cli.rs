@@ -116,13 +116,19 @@ struct BudgetOpts {
     #[arg(long)]
     mcts_sims: Option<usize>,
     #[arg(long)]
-    engine_budget: Option<u64>,
+    engine_mode: Option<String>,
+    #[arg(long)]
+    engine_deterministic_depth: Option<i32>,
+    #[arg(long)]
+    engine_chance_depth: Option<i32>,
+    #[arg(long)]
+    engine_time_ms: Option<u64>,
     #[arg(long)]
     nnue_mode: Option<String>,
     #[arg(long)]
-    nnue_depth: Option<i32>,
+    nnue_deterministic_depth: Option<i32>,
     #[arg(long)]
-    nnue_budget: Option<u64>,
+    nnue_chance_depth: Option<i32>,
     #[arg(long)]
     nnue_time_ms: Option<u64>,
     #[arg(long)]
@@ -131,10 +137,13 @@ struct BudgetOpts {
 impl BudgetOpts {
     fn apply(&self, obj: &mut Value) {
         set_opt!(obj, "mctsSims", self.mcts_sims);
-        set_opt!(obj, "engineBudget", self.engine_budget);
+        set_opt!(obj, "engineBudgetMode", &self.engine_mode);
+        set_opt!(obj, "engineDeterministicDepth", self.engine_deterministic_depth);
+        set_opt!(obj, "engineChanceOutcomeDepth", self.engine_chance_depth);
+        set_opt!(obj, "engineTimeMs", self.engine_time_ms);
         set_opt!(obj, "nnueBudgetMode", &self.nnue_mode);
-        set_opt!(obj, "nnueDepth", self.nnue_depth);
-        set_opt!(obj, "nnueBudget", self.nnue_budget);
+        set_opt!(obj, "nnueDeterministicDepth", self.nnue_deterministic_depth);
+        set_opt!(obj, "nnueChanceOutcomeDepth", self.nnue_chance_depth);
         set_opt!(obj, "nnueTimeMs", self.nnue_time_ms);
         set_opt!(obj, "searchTimeoutMs", self.search_timeout_ms);
     }

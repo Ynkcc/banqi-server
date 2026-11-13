@@ -54,8 +54,8 @@ pub async fn engine_move(
         let budget = bqsrv_app::state::AppState::build_budget(
             app.params().engine_budget,
             req.budget.engine_budget_mode.as_deref(),
-            req.budget.engine_budget,
-            req.budget.engine_depth,
+            req.budget.engine_deterministic_depth,
+            req.budget.engine_chance_outcome_depth,
             req.budget.engine_time_ms,
             req.budget.search_timeout_ms,
         )?;
@@ -77,8 +77,8 @@ pub async fn engine_move(
             StrategyKind::ExpectimaxNnue => {
                 let budget = app.build_search_budget(
                     req.budget.nnue_budget_mode.as_deref(),
-                    req.budget.nnue_budget,
-                    req.budget.nnue_depth,
+                    req.budget.nnue_deterministic_depth,
+                    req.budget.nnue_chance_outcome_depth,
                     req.budget.nnue_time_ms,
                     req.budget.search_timeout_ms,
                 )?;

@@ -281,33 +281,33 @@ pub fn strategy_slot_view(
     params: EngineParams,
 ) -> SlotView {
     let (b, e) = (&params.nnue_budget, &params.engine_budget);
-    let (budget_mode, budget_depth, budget, budget_time_ms, search_timeout_ms) = match kind {
-        StrategyKind::ExpectimaxNnue => (
-            Some(b.mode.as_str().to_string()),
-            (b.mode == BudgetMode::DepthNodes).then_some(b.depth),
-            (b.mode != BudgetMode::Time).then_some(b.nodes),
-            (b.mode == BudgetMode::Time).then_some(b.time_ms),
-            Some(b.timeout_ms),
-        ),
-        StrategyKind::Expectimax => (
-            Some(e.mode.as_str().to_string()),
-            (e.mode == BudgetMode::DepthNodes).then_some(e.depth),
-            (e.mode != BudgetMode::Time).then_some(e.nodes),
-            (e.mode == BudgetMode::Time).then_some(e.time_ms),
-            Some(e.timeout_ms),
-        ),
-        _ => (None, None, None, None, None),
-    };
+    let (budget_mode, deterministic_depth, chance_outcome_depth, budget_time_ms, search_timeout_ms) =
+        match kind {
+            StrategyKind::ExpectimaxNnue => (
+                Some(b.mode.as_str().to_string()),
+                (b.mode == BudgetMode::Depth).then_some(b.depth),
+                (b.mode == BudgetMode::Depth).then_some(b.chance_outcome_depth),
+                (b.mode == BudgetMode::Time).then_some(b.time_ms),
+                Some(b.timeout_ms),
+            ),
+            StrategyKind::Expectimax => (
+                Some(e.mode.as_str().to_string()),
+                (e.mode == BudgetMode::Depth).then_some(e.depth),
+                (e.mode == BudgetMode::Depth).then_some(e.chance_outcome_depth),
+                (e.mode == BudgetMode::Time).then_some(e.time_ms),
+                Some(e.timeout_ms),
+            ),
+            _ => (None, None, None, None, None),
+        };
     SlotView {
         kind: kind.as_str().to_string(),
         label: None,
         agent_id: None,
         model_file,
         mcts_sims: kind.is_mcts().then_some(params.mcts_sims),
-        engine_budget: (kind == StrategyKind::Expectimax).then_some(e.nodes),
         budget_mode,
-        budget_depth,
-        budget,
+        deterministic_depth,
+        chance_outcome_depth,
         budget_time_ms,
         search_timeout_ms,
     }
@@ -407,11 +407,7 @@ impl AppState {
         );
         let params = EngineParams {
             mcts_sims: config.default_sims.max(1),
-            engine_budget: crate::app::search::SearchBudget {
-                mode: crate::app::search::BudgetMode::Nodes,
-                nodes: config.default_engine_budget.max(1),
-                ..SearchBudget::default()
-            },
+            engine_budget: config.default_engine.clamped(),
             nnue_budget: config.default_nnue.clamped(),
         };
         Self {
@@ -552,16 +548,16 @@ impl AppState {
     pub fn build_search_budget(
         &self,
         mode: Option<&str>,
-        nodes: Option<u64>,
         depth: Option<i32>,
+        chance_outcome_depth: Option<i32>,
         time_ms: Option<u64>,
         timeout_ms: Option<u64>,
     ) -> Result<SearchBudget, ApiError> {
         Self::build_budget(
             self.default_nnue_budget(),
             mode,
-            nodes,
             depth,
+            chance_outcome_depth,
             time_ms,
             timeout_ms,
         )
@@ -570,16 +566,16 @@ impl AppState {
     pub fn build_engine_budget(
         &self,
         mode: Option<&str>,
-        nodes: Option<u64>,
         depth: Option<i32>,
+        chance_outcome_depth: Option<i32>,
         time_ms: Option<u64>,
         timeout_ms: Option<u64>,
     ) -> Result<SearchBudget, ApiError> {
         Self::build_budget(
             self.params().engine_budget,
             mode,
-            nodes,
             depth,
+            chance_outcome_depth,
             time_ms,
             timeout_ms,
         )
@@ -587,8 +583,8 @@ impl AppState {
     pub fn build_budget(
         defaults: SearchBudget,
         mode: Option<&str>,
-        nodes: Option<u64>,
         depth: Option<i32>,
+        chance_outcome_depth: Option<i32>,
         time_ms: Option<u64>,
         timeout_ms: Option<u64>,
     ) -> Result<SearchBudget, ApiError> {
@@ -596,14 +592,16 @@ impl AppState {
             None => defaults.mode,
             Some(s) => BudgetMode::parse(s).ok_or_else(|| {
                 ApiError::BadRequest(format!(
-                    "非法预算模式: {s}（可选 nodes / depth_nodes / time）"
+                    "非法预算模式: {s}（可选 depth / time，旧值 depth_nodes 视为 depth）"
                 ))
             })?,
         };
         Ok(SearchBudget {
             mode,
-            nodes: nodes.unwrap_or(defaults.nodes).max(1),
             depth: depth.unwrap_or(defaults.depth).max(1),
+            chance_outcome_depth: chance_outcome_depth
+                .unwrap_or(defaults.chance_outcome_depth)
+                .max(0),
             time_ms: time_ms.unwrap_or(defaults.time_ms),
             timeout_ms: timeout_ms.unwrap_or(defaults.timeout_ms).max(1),
         })
@@ -661,15 +659,15 @@ impl AppState {
         };
         let nnue_budget = self.build_search_budget(
             p.budget.nnue_budget_mode.as_deref(),
-            p.budget.nnue_budget,
-            p.budget.nnue_depth,
+            p.budget.nnue_deterministic_depth,
+            p.budget.nnue_chance_outcome_depth,
             p.budget.nnue_time_ms,
             p.budget.search_timeout_ms,
         )?;
         let engine_budget = self.build_engine_budget(
             p.budget.engine_budget_mode.as_deref(),
-            p.budget.engine_budget,
-            p.budget.engine_depth,
+            p.budget.engine_deterministic_depth,
+            p.budget.engine_chance_outcome_depth,
             p.budget.engine_time_ms,
             p.budget.search_timeout_ms,
         )?;
@@ -838,7 +836,7 @@ mod tests {
         assert_eq!(app.default_sims(), 1);
         assert_eq!(app.default_variant(), Variant::ALL[0]);
         let b = app.default_nnue_budget();
-        assert_eq!(b.mode, crate::app::search::BudgetMode::DepthNodes);
+        assert_eq!(b.mode, crate::app::search::BudgetMode::Depth);
         assert_eq!(b.timeout_ms, 60_000);
     }
     #[test]

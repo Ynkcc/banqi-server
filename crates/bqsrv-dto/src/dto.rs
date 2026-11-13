@@ -56,13 +56,13 @@ pub struct SlotReq {
 pub struct BudgetParams {
     #[serde(default)]
     #[ts(optional)]
-    pub engine_budget: Option<u64>,
-    #[serde(default)]
-    #[ts(optional)]
     pub engine_budget_mode: Option<String>,
     #[serde(default)]
     #[ts(optional)]
-    pub engine_depth: Option<i32>,
+    pub engine_deterministic_depth: Option<i32>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub engine_chance_outcome_depth: Option<i32>,
     #[serde(default)]
     #[ts(optional)]
     pub engine_time_ms: Option<u64>,
@@ -71,10 +71,10 @@ pub struct BudgetParams {
     pub nnue_budget_mode: Option<String>,
     #[serde(default)]
     #[ts(optional)]
-    pub nnue_depth: Option<i32>,
+    pub nnue_deterministic_depth: Option<i32>,
     #[serde(default)]
     #[ts(optional)]
-    pub nnue_budget: Option<u64>,
+    pub nnue_chance_outcome_depth: Option<i32>,
     #[serde(default)]
     #[ts(optional)]
     pub nnue_time_ms: Option<u64>,
@@ -265,17 +265,13 @@ pub struct SlotView {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
-    pub engine_budget: Option<u64>,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
     pub budget_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
-    pub budget_depth: Option<i32>,
+    pub deterministic_depth: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
-    pub budget: Option<u64>,
+    pub chance_outcome_depth: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub budget_time_ms: Option<u64>,
@@ -291,10 +287,9 @@ impl SlotView {
             agent_id: None,
             model_file: None,
             mcts_sims: None,
-            engine_budget: None,
             budget_mode: None,
-            budget_depth: None,
-            budget: None,
+            deterministic_depth: None,
+            chance_outcome_depth: None,
             budget_time_ms: None,
             search_timeout_ms: None,
         }
@@ -312,7 +307,6 @@ pub struct ExSearchStats {
     pub engine: String,
     pub mode: String,
     pub depth: i32,
-    pub budget: u64,
     pub time_limit_ms: u64,
     pub nodes: u64,
     pub reached_depth: i32,
@@ -466,7 +460,6 @@ pub struct NnueSearchStats {
     pub engine: &'static str,
     pub mode: &'static str,
     pub depth: i32,
-    pub budget: u64,
     pub time_limit_ms: u64,
     pub nodes: u64,
     pub reached_depth: i32,
@@ -478,7 +471,6 @@ pub struct NnueStatsDto {
     pub engine: String,
     pub mode: String,
     pub depth: i32,
-    pub budget: u64,
     pub time_limit_ms: u64,
     pub nodes: u64,
     pub reached_depth: i32,
@@ -490,7 +482,6 @@ impl From<&NnueSearchStats> for NnueStatsDto {
             engine: s.engine.to_string(),
             mode: s.mode.to_string(),
             depth: s.depth,
-            budget: s.budget,
             time_limit_ms: s.time_limit_ms,
             nodes: s.nodes,
             reached_depth: s.reached_depth,
@@ -504,7 +495,6 @@ impl From<&NnueSearchStats> for ExSearchStats {
             engine: s.engine.to_string(),
             mode: s.mode.to_string(),
             depth: s.depth,
-            budget: s.budget,
             time_limit_ms: s.time_limit_ms,
             nodes: s.nodes,
             reached_depth: s.reached_depth,
@@ -759,13 +749,13 @@ pub struct ScenariosResp {
 #[serde(rename_all = "camelCase")]
 pub struct SettingsResp {
     pub mcts_sims: usize,
-    pub engine_budget: u64,
     pub engine_budget_mode: String,
-    pub engine_depth: i32,
+    pub engine_deterministic_depth: i32,
+    pub engine_chance_outcome_depth: i32,
     pub engine_time_ms: u64,
     pub nnue_budget_mode: String,
-    pub nnue_depth: i32,
-    pub nnue_budget: u64,
+    pub nnue_deterministic_depth: i32,
+    pub nnue_chance_outcome_depth: i32,
     pub nnue_time_ms: u64,
     pub search_timeout_ms: u64,
 }
@@ -773,13 +763,13 @@ impl From<EngineParams> for SettingsResp {
     fn from(p: EngineParams) -> Self {
         Self {
             mcts_sims: p.mcts_sims,
-            engine_budget: p.engine_budget.nodes,
             engine_budget_mode: p.engine_budget.mode.as_str().to_string(),
-            engine_depth: p.engine_budget.depth,
+            engine_deterministic_depth: p.engine_budget.depth,
+            engine_chance_outcome_depth: p.engine_budget.chance_outcome_depth,
             engine_time_ms: p.engine_budget.time_ms,
             nnue_budget_mode: p.nnue_budget.mode.as_str().to_string(),
-            nnue_depth: p.nnue_budget.depth,
-            nnue_budget: p.nnue_budget.nodes,
+            nnue_deterministic_depth: p.nnue_budget.depth,
+            nnue_chance_outcome_depth: p.nnue_budget.chance_outcome_depth,
             nnue_time_ms: p.nnue_budget.time_ms,
             search_timeout_ms: p.nnue_budget.timeout_ms,
         }

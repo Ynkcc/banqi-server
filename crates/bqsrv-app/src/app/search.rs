@@ -17,13 +17,8 @@ fn nnue_stats_from(
     NnueSearchStats {
         engine,
         mode: budget.mode.as_str(),
-        depth: if budget.mode == BudgetMode::DepthNodes {
-            cfg.budget.max_depth
-        } else {
-            0
-        },
-        budget: if budget.mode != BudgetMode::Time {
-            cfg.budget.node_budget
+        depth: if budget.mode == BudgetMode::Depth {
+            cfg.budget.deterministic_depth
         } else {
             0
         },

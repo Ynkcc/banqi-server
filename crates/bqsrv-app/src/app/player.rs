@@ -447,8 +447,9 @@ mod tests {
             None,
             EngineParams {
                 engine_budget: SearchBudget {
-                    mode: BudgetMode::Nodes,
-                    nodes: 1_000,
+                    mode: BudgetMode::Depth,
+                    depth: 4,
+                    chance_outcome_depth: 1,
                     ..Default::default()
                 },
                 ..EngineParams::default()
@@ -465,8 +466,9 @@ mod tests {
         assert!(tree.tree.root.is_some(), "搜索树必须有根节点");
         let stats = d.nnue_stats.expect("Expectimax 决策应携带搜索统计");
         assert_eq!(stats.engine, "rule");
-        assert_eq!(stats.mode, "nodes");
-        assert_eq!(stats.budget, 1_000);
+        assert_eq!(stats.mode, "depth");
+        assert_eq!(stats.depth, 4);
+        assert!(stats.nodes > 0, "统计应记录实际展开节点数");
     }
     #[test]
     fn expectimax_rule_stats_flow_into_archive() {
@@ -477,8 +479,8 @@ mod tests {
             None,
             EngineParams {
                 engine_budget: SearchBudget {
-                    mode: BudgetMode::Nodes,
-                    nodes: 1_000,
+                    mode: BudgetMode::Depth,
+                    depth: 4,
                     ..Default::default()
                 },
                 ..EngineParams::default()
