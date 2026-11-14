@@ -31,6 +31,7 @@ impl BudgetMode {
 pub struct SearchBudget {
     pub mode: BudgetMode,
     pub depth: i32,
+
     pub chance_outcome_depth: i32,
     pub time_ms: u64,
     pub timeout_ms: u64,

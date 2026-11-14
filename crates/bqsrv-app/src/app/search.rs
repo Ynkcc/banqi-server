@@ -1,7 +1,7 @@
 use banqi_core::core::env::DarkChessEnv;
 use banqi_core::core::expectimax::nnue::NnueEvaluate;
 use banqi_core::core::expectimax::{SearchConfig, SearchResult};
-use banqi_engine::nnue::NnueEvaluator;
+use banqi_engine::nnue::QNnueEvaluator;
 pub use bqsrv_config::{BudgetMode, SearchBudget};
 pub use bqsrv_dto::NnueSearchStats;
 use std::sync::Arc;
@@ -71,7 +71,7 @@ pub fn expectimax_search_tree(
 
 pub fn nnue_search_tree(
     env: &DarkChessEnv,
-    evaluator: Arc<NnueEvaluator>,
+    evaluator: Arc<QNnueEvaluator>,
     budget: SearchBudget,
 ) -> Result<(usize, crate::app::expectimax_view::ExpectimaxTree), String> {
     evaluator

@@ -3,7 +3,7 @@ use banqi_core::core::env::config::GameConfig;
 use banqi_engine::inference::ModelCache;
 #[cfg(feature = "onnx")]
 use banqi_engine::inference::OnnxModelCache;
-use banqi_engine::nnue::NnueEvaluator;
+use banqi_engine::nnue::QNnueEvaluator;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 pub fn scan_model_files(dir: &Path, extensions: &[&str], max_depth: usize) -> Vec<PathBuf> {
@@ -81,7 +81,7 @@ pub struct ModelPool {
     onnx_cache: OnnxModelCache,
     #[cfg(feature = "torch")]
     loaded_torch: ModelCache<banqi_engine::engine::ModelWrapper>,
-    loaded_nnue: ModelCache<NnueEvaluator>,
+    loaded_nnue: ModelCache<QNnueEvaluator>,
     models_dir: PathBuf,
     #[cfg(feature = "onnx")]
     sessions: usize,
@@ -181,17 +181,17 @@ impl ModelPool {
                 .to_string(),
         )
     }
-    pub fn acquire_nnue(&self, file: &str) -> Result<Arc<NnueEvaluator>, String> {
+    pub fn acquire_nnue(&self, file: &str) -> Result<Arc<QNnueEvaluator>, String> {
         self.loaded_nnue.get_or_load(file, |p| {
             tracing::info!("首次使用，加载 NNUE 模型: {p}");
-            Ok(Arc::new(NnueEvaluator::load_from_file(p)?))
+            Ok(Arc::new(QNnueEvaluator::load_from_file(p)?))
         })
     }
     pub fn acquire_nnue_validated(
         &self,
         file: &str,
         config: &GameConfig,
-    ) -> Result<Arc<NnueEvaluator>, String> {
+    ) -> Result<Arc<QNnueEvaluator>, String> {
         let evaluator = self.acquire_nnue(file)?;
         evaluator
             .validate_layout(config)
