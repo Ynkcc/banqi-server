@@ -240,16 +240,16 @@ pub async fn manual_expectimax_search(
 
         Nnue(String),
     }
-    let (variant, snap, budget, eval_sel, version) = {
+    let (variant, snap, run, roots, eval_sel, version) = {
         let games = read_lock(&app.games);
         let s = get_session(&games, id, game_id)?;
         let side = s.slots.side(s.core.current.current_player);
-        let (budget, eval_sel) = match side {
+        let (run, eval_sel) = match side {
             PlayerSlot::Strategy {
                 kind: StrategyKind::Expectimax,
                 params,
                 ..
-            } => (params.engine_budget, EvalSel::Rule),
+            } => (params.engine, EvalSel::Rule),
             PlayerSlot::Strategy {
                 kind: StrategyKind::ExpectimaxNnue,
                 model_file,
@@ -260,27 +260,28 @@ pub async fn manual_expectimax_search(
                     Some(f) => f,
                     None => app.resolve_model_file(None, s.core.variant)?,
                 };
-                (params.nnue_budget, EvalSel::Nnue(f))
+                (params.nnue, EvalSel::Nnue(f))
             }
             _ => (
-                app.default_nnue_budget(),
+                app.default_nnue_run(),
                 EvalSel::Nnue(app.resolve_model_file(None, s.core.variant)?),
             ),
         };
         (
             s.core.variant,
             s.core.current.clone(),
-            budget,
+            run,
+            app.params().roots,
             eval_sel,
             s.core.version,
         )
     };
-    let search = |evaluator, budget, label| async move {
+    let search = |evaluator, run, label| async move {
         crate::app::common::blocking(move || {
             use banqi_core::core::env::SnapshotEnv;
             let env =
                 DarkChessEnv::from_snapshot(&snap).map_err(|e| format!("重建环境失败: {e}"))?;
-            crate::app::search::expectimax_search_tree(&env, evaluator, budget, label)
+            crate::app::search::expectimax_search_tree(&env, evaluator, run, roots, label)
         })
         .await
     };
@@ -288,7 +289,7 @@ pub async fn manual_expectimax_search(
         EvalSel::Rule => {
             let evaluator =
                 Arc::new(banqi_core::core::expectimax::rule_eval::RuleMaterialEval::default());
-            search(evaluator, budget, "rule").await?.1
+            search(evaluator, run, "rule").await?.1
         }
         EvalSel::Nnue(model_file) => {
             if !model_file.ends_with(".nnue") {
@@ -301,7 +302,7 @@ pub async fn manual_expectimax_search(
                 .acquire_nnue_validated(model_file, variant)
                 .await
                 .map_err(ApiError::ModelUnavailable)?;
-            search(evaluator, budget, "nnue").await?.1
+            search(evaluator, run, "nnue").await?.1
         }
     };
     let info = ex_root_info(&kept).ok_or_else(|| ApiError::Internal("搜索未产生轨迹树".into()))?;

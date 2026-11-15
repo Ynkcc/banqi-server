@@ -1,22 +1,32 @@
 use crate::app::envops::StepOutcome;
 use crate::app::mcts_view::MctsTree;
 pub use crate::app::models::EngineKind;
-use crate::app::player::{Agent, EngineParams, PlayerSlot, Slots, StrategyKind};
-use crate::app::search::{BudgetMode, SearchBudget};
+use crate::app::player::{Agent, PlayerSlot, SlotParams, Slots, StrategyKind};
 use crate::app::session::SnapshotSession;
 use crate::app::sync::{lock, read_lock, write_lock};
 use banqi_core::core::env::DarkChessEnv;
 use banqi_core::core::env::{PositionSnapshot, Variant};
 use banqi_engine::nnue::QNnueEvaluator;
-use bqsrv_config::ServerConfig;
+use bqsrv_config::{ExpectimaxPartial, ExpectimaxRun, MctsSchema, ServerConfig, TimeBudgetMode};
 use bqsrv_dto::ApiError;
-use bqsrv_dto::{winner_str, ActionView, GameStateResp, HistoryMoveView, SlotView, SlotsView};
+use bqsrv_dto::{ActionView, GameStateResp, HistoryMoveView, SlotView, SlotsView, winner_str};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 use uuid::Uuid;
 pub type Models = crate::app::models::ModelPool;
+
+fn depth_partial(
+    deterministic_depth: Option<i32>,
+    chance_outcome_depth: Option<i32>,
+) -> ExpectimaxPartial {
+    serde_json::from_value(serde_json::json!({
+        "deterministic_depth": deterministic_depth,
+        "chance_outcome_depth": chance_outcome_depth,
+    }))
+    .expect("双字段 ExpectimaxPartial 构造不应失败")
+}
 pub use bq_util::unix_now;
 pub struct GameSession {
     pub core: SnapshotSession,
@@ -278,24 +288,24 @@ pub fn from_server_over_reason(reason: Option<&str>) -> u32 {
 pub fn strategy_slot_view(
     kind: StrategyKind,
     model_file: Option<String>,
-    params: EngineParams,
+    params: SlotParams,
 ) -> SlotView {
-    let (b, e) = (&params.nnue_budget, &params.engine_budget);
+    let (b, e) = (&params.nnue, &params.engine);
     let (budget_mode, deterministic_depth, chance_outcome_depth, budget_time_ms, search_timeout_ms) =
         match kind {
             StrategyKind::ExpectimaxNnue => (
-                Some(b.mode.as_str().to_string()),
-                (b.mode == BudgetMode::Depth).then_some(b.depth),
-                (b.mode == BudgetMode::Depth).then_some(b.chance_outcome_depth),
-                (b.mode == BudgetMode::Time).then_some(b.time_ms),
-                Some(b.timeout_ms),
+                Some(b.time.mode.as_str().to_string()),
+                (b.time.mode == TimeBudgetMode::Depth).then_some(b.schema.deterministic_depth),
+                (b.time.mode == TimeBudgetMode::Depth).then_some(b.schema.chance_outcome_depth),
+                (b.time.mode == TimeBudgetMode::Time).then_some(b.time.time_ms),
+                Some(b.time.timeout_ms),
             ),
             StrategyKind::Expectimax => (
-                Some(e.mode.as_str().to_string()),
-                (e.mode == BudgetMode::Depth).then_some(e.depth),
-                (e.mode == BudgetMode::Depth).then_some(e.chance_outcome_depth),
-                (e.mode == BudgetMode::Time).then_some(e.time_ms),
-                Some(e.timeout_ms),
+                Some(e.time.mode.as_str().to_string()),
+                (e.time.mode == TimeBudgetMode::Depth).then_some(e.schema.deterministic_depth),
+                (e.time.mode == TimeBudgetMode::Depth).then_some(e.schema.chance_outcome_depth),
+                (e.time.mode == TimeBudgetMode::Time).then_some(e.time.time_ms),
+                Some(e.time.timeout_ms),
             ),
             _ => (None, None, None, None, None),
         };
@@ -304,7 +314,7 @@ pub fn strategy_slot_view(
         label: None,
         agent_id: None,
         model_file,
-        mcts_sims: kind.is_mcts().then_some(params.mcts_sims),
+        mcts_sims: kind.is_mcts().then_some(params.mcts.sims),
         budget_mode,
         deterministic_depth,
         chance_outcome_depth,
@@ -335,7 +345,7 @@ fn labeled_slot_view(slot: &PlayerSlot, label: Option<String>) -> SlotView {
 }
 pub struct AppState {
     pub config: ServerConfig,
-    pub params: RwLock<EngineParams>,
+    pub params: RwLock<SlotParams>,
     pub models: Models,
     pub games: RwLock<HashMap<Uuid, GameSession>>,
     pub agents: RwLock<HashMap<Uuid, Agent>>,
@@ -405,11 +415,13 @@ impl AppState {
             &config.device,
             config.nn_cache_entries,
         );
-        let params = EngineParams {
-            mcts_sims: config.default_sims.max(1),
-            engine_budget: config.default_engine.clamped(),
-            nnue_budget: config.default_nnue.clamped(),
-        };
+        let params = SlotParams {
+            mcts: config.default_mcts,
+            engine: config.default_engine,
+            nnue: config.default_nnue,
+            roots: config.root_tuning,
+        }
+        .clamped();
         Self {
             params: RwLock::new(params),
             config,
@@ -536,84 +548,114 @@ impl AppState {
             tracing::info!("已从 {dir:?} 加载 {count} 条历史归档");
         }
     }
-    pub fn params(&self) -> EngineParams {
+    pub fn params(&self) -> SlotParams {
         *read_lock(&self.params)
     }
     pub fn default_sims(&self) -> usize {
-        self.params().mcts_sims
+        self.params().mcts.sims
     }
-    pub fn default_nnue_budget(&self) -> SearchBudget {
-        self.params().nnue_budget
+    pub fn default_nnue_run(&self) -> ExpectimaxRun {
+        self.params().nnue
     }
-    pub fn build_search_budget(
+
+    pub fn build_nnue_run(
         &self,
         mode: Option<&str>,
         depth: Option<i32>,
         chance_outcome_depth: Option<i32>,
         time_ms: Option<u64>,
         timeout_ms: Option<u64>,
-    ) -> Result<SearchBudget, ApiError> {
-        Self::build_budget(
-            self.default_nnue_budget(),
+        schema_json: Option<&str>,
+    ) -> Result<ExpectimaxRun, ApiError> {
+        Self::build_expectimax_run(
+            self.default_nnue_run(),
             mode,
             depth,
             chance_outcome_depth,
             time_ms,
             timeout_ms,
+            schema_json,
         )
     }
 
-    pub fn build_engine_budget(
+    pub fn build_engine_run(
         &self,
         mode: Option<&str>,
         depth: Option<i32>,
         chance_outcome_depth: Option<i32>,
         time_ms: Option<u64>,
         timeout_ms: Option<u64>,
-    ) -> Result<SearchBudget, ApiError> {
-        Self::build_budget(
-            self.params().engine_budget,
+        schema_json: Option<&str>,
+    ) -> Result<ExpectimaxRun, ApiError> {
+        Self::build_expectimax_run(
+            self.params().engine,
             mode,
             depth,
             chance_outcome_depth,
             time_ms,
             timeout_ms,
+            schema_json,
         )
     }
-    pub fn build_budget(
-        defaults: SearchBudget,
+
+    pub fn build_expectimax_run(
+        defaults: ExpectimaxRun,
         mode: Option<&str>,
         depth: Option<i32>,
         chance_outcome_depth: Option<i32>,
         time_ms: Option<u64>,
         timeout_ms: Option<u64>,
-    ) -> Result<SearchBudget, ApiError> {
-        let mode = match mode {
-            None => defaults.mode,
-            Some(s) => BudgetMode::parse(s).ok_or_else(|| {
+        schema_json: Option<&str>,
+    ) -> Result<ExpectimaxRun, ApiError> {
+        let mut schema = defaults.schema;
+        if let Some(json) = schema_json {
+            let partial = bqsrv_config::parse_expectimax_partial(json)
+                .map_err(|e| ApiError::BadRequest(format!("非法 Expectimax schema JSON: {e}")))?;
+            schema.merge_partial(partial);
+        }
+
+        schema.merge_partial(depth_partial(depth, chance_outcome_depth));
+        let mut time = defaults.time;
+        if let Some(s) = mode {
+            time.mode = TimeBudgetMode::parse(s).ok_or_else(|| {
                 ApiError::BadRequest(format!(
                     "非法预算模式: {s}（可选 depth / time，旧值 depth_nodes 视为 depth）"
                 ))
-            })?,
-        };
-        Ok(SearchBudget {
-            mode,
-            depth: depth.unwrap_or(defaults.depth).max(1),
-            chance_outcome_depth: chance_outcome_depth
-                .unwrap_or(defaults.chance_outcome_depth)
-                .max(0),
-            time_ms: time_ms.unwrap_or(defaults.time_ms),
-            timeout_ms: timeout_ms.unwrap_or(defaults.timeout_ms).max(1),
-        })
+            })?;
+        }
+        if let Some(v) = time_ms {
+            time.time_ms = v;
+        }
+        if let Some(v) = timeout_ms {
+            time.timeout_ms = v.max(1);
+        }
+        Ok(ExpectimaxRun { schema, time }.clamped())
+    }
+
+    pub fn build_mcts_schema(
+        defaults: MctsSchema,
+        mcts_sims: Option<usize>,
+        schema_json: Option<&str>,
+    ) -> Result<MctsSchema, ApiError> {
+        let mut schema = defaults;
+        if let Some(json) = schema_json {
+            let partial = bqsrv_config::parse_mcts_partial(json)
+                .map_err(|e| ApiError::BadRequest(format!("非法 MCTS schema JSON: {e}")))?;
+            schema.merge_partial(partial);
+        }
+        if let Some(sims) = mcts_sims {
+            schema.merge_partial(bqsrv_config::mcts_sims_partial(sims));
+        }
+        Ok(schema)
     }
     pub fn update_params(
         &self,
-        mcts_sims: Option<usize>,
-        engine_budget: Option<SearchBudget>,
-        nnue_budget: Option<SearchBudget>,
-    ) -> EngineParams {
+        mcts: Option<MctsSchema>,
+        engine: Option<ExpectimaxRun>,
+        nnue: Option<ExpectimaxRun>,
+    ) -> SlotParams {
         let mut p = write_lock(&self.params);
-        *p = p.updated(mcts_sims, engine_budget, nnue_budget);
+        *p = p.updated(mcts, engine, nnue);
         *p
     }
     pub fn register_agent(&self, agent: Agent) -> Agent {
@@ -652,30 +694,35 @@ impl AppState {
     pub fn slot_params(
         &self,
         params: Option<&bqsrv_dto::SlotParamsReq>,
-    ) -> Result<EngineParams, ApiError> {
+    ) -> Result<SlotParams, ApiError> {
         let d = self.params();
         let Some(p) = params else {
             return Ok(d);
         };
-        let nnue_budget = self.build_search_budget(
+        let nnue = self.build_nnue_run(
             p.budget.nnue_budget_mode.as_deref(),
             p.budget.nnue_deterministic_depth,
             p.budget.nnue_chance_outcome_depth,
             p.budget.nnue_time_ms,
             p.budget.search_timeout_ms,
+            p.nnue_schema.as_deref(),
         )?;
-        let engine_budget = self.build_engine_budget(
+        let engine = self.build_engine_run(
             p.budget.engine_budget_mode.as_deref(),
             p.budget.engine_deterministic_depth,
             p.budget.engine_chance_outcome_depth,
             p.budget.engine_time_ms,
             p.budget.search_timeout_ms,
+            p.engine_schema.as_deref(),
         )?;
-        Ok(EngineParams {
-            mcts_sims: p.mcts_sims.unwrap_or(d.mcts_sims).max(1),
-            engine_budget,
-            nnue_budget,
-        })
+        let mcts = Self::build_mcts_schema(d.mcts, p.mcts_sims, p.mcts_schema.as_deref())?;
+        Ok(SlotParams {
+            mcts,
+            engine,
+            nnue,
+            roots: d.roots,
+        }
+        .clamped())
     }
     pub fn default_variant(&self) -> Variant {
         self.config.default_variant.unwrap_or(Variant::ALL[0])
@@ -831,13 +878,20 @@ mod tests {
     #[test]
     fn set_default_sims_clamps_to_at_least_one() {
         let app = test_app();
-        let p = app.update_params(Some(0), None, None);
-        assert_eq!(p.mcts_sims, 1);
+        let p = app.update_params(
+            Some(MctsSchema {
+                sims: 0,
+                ..MctsSchema::default()
+            }),
+            None,
+            None,
+        );
+        assert_eq!(p.mcts.sims, 1);
         assert_eq!(app.default_sims(), 1);
         assert_eq!(app.default_variant(), Variant::ALL[0]);
-        let b = app.default_nnue_budget();
-        assert_eq!(b.mode, crate::app::search::BudgetMode::Depth);
-        assert_eq!(b.timeout_ms, 60_000);
+        let run = app.default_nnue_run();
+        assert_eq!(run.time.mode, TimeBudgetMode::Depth);
+        assert_eq!(run.time.timeout_ms, 60_000);
     }
     #[test]
     fn session_delegates_apply_and_undo() {

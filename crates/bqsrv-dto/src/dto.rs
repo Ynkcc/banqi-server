@@ -1,4 +1,4 @@
-use bqsrv_config::EngineParams;
+use bqsrv_config::SlotParams;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -89,6 +89,18 @@ pub struct SlotParamsReq {
     #[serde(default)]
     #[ts(optional)]
     pub mcts_sims: Option<usize>,
+
+    #[serde(default)]
+    #[ts(optional)]
+    pub mcts_schema: Option<String>,
+
+    #[serde(default)]
+    #[ts(optional)]
+    pub engine_schema: Option<String>,
+
+    #[serde(default)]
+    #[ts(optional)]
+    pub nnue_schema: Option<String>,
     #[serde(flatten)]
     pub budget: BudgetParams,
 }
@@ -163,6 +175,16 @@ pub struct SettingsReq {
     #[serde(default)]
     #[ts(optional)]
     pub mcts_sims: Option<usize>,
+
+    #[serde(default)]
+    #[ts(optional)]
+    pub mcts_schema: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub engine_schema: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub nnue_schema: Option<String>,
     #[serde(flatten)]
     pub budget: BudgetParams,
 }
@@ -212,6 +234,16 @@ pub struct EngineMoveReq {
     #[serde(default)]
     #[ts(optional)]
     pub mcts_sims: Option<usize>,
+
+    #[serde(default)]
+    #[ts(optional)]
+    pub mcts_schema: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub engine_schema: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub nnue_schema: Option<String>,
 
     #[serde(flatten)]
     pub budget: BudgetParams,
@@ -758,20 +790,27 @@ pub struct SettingsResp {
     pub nnue_chance_outcome_depth: i32,
     pub nnue_time_ms: u64,
     pub search_timeout_ms: u64,
+
+    pub mcts_schema: String,
+    pub engine_schema: String,
+    pub nnue_schema: String,
 }
-impl From<EngineParams> for SettingsResp {
-    fn from(p: EngineParams) -> Self {
+impl From<SlotParams> for SettingsResp {
+    fn from(p: SlotParams) -> Self {
         Self {
-            mcts_sims: p.mcts_sims,
-            engine_budget_mode: p.engine_budget.mode.as_str().to_string(),
-            engine_deterministic_depth: p.engine_budget.depth,
-            engine_chance_outcome_depth: p.engine_budget.chance_outcome_depth,
-            engine_time_ms: p.engine_budget.time_ms,
-            nnue_budget_mode: p.nnue_budget.mode.as_str().to_string(),
-            nnue_deterministic_depth: p.nnue_budget.depth,
-            nnue_chance_outcome_depth: p.nnue_budget.chance_outcome_depth,
-            nnue_time_ms: p.nnue_budget.time_ms,
-            search_timeout_ms: p.nnue_budget.timeout_ms,
+            mcts_sims: p.mcts.sims,
+            engine_budget_mode: p.engine.time.mode.as_str().to_string(),
+            engine_deterministic_depth: p.engine.schema.deterministic_depth,
+            engine_chance_outcome_depth: p.engine.schema.chance_outcome_depth,
+            engine_time_ms: p.engine.time.time_ms,
+            nnue_budget_mode: p.nnue.time.mode.as_str().to_string(),
+            nnue_deterministic_depth: p.nnue.schema.deterministic_depth,
+            nnue_chance_outcome_depth: p.nnue.schema.chance_outcome_depth,
+            nnue_time_ms: p.nnue.time.time_ms,
+            search_timeout_ms: p.nnue.time.timeout_ms,
+            mcts_schema: serde_json::to_string(&p.mcts).unwrap_or_default(),
+            engine_schema: serde_json::to_string(&p.engine.schema).unwrap_or_default(),
+            nnue_schema: serde_json::to_string(&p.nnue.schema).unwrap_or_default(),
         }
     }
 }

@@ -201,31 +201,38 @@ async fn put_settings(
     State(app): State<SharedState>,
     Json(req): Json<SettingsReq>,
 ) -> Result<Json<SettingsResp>, ApiError> {
-    let nnue_budget = app.build_search_budget(
+    let nnue = app.build_nnue_run(
         req.budget.nnue_budget_mode.as_deref(),
         req.budget.nnue_deterministic_depth,
         req.budget.nnue_chance_outcome_depth,
         req.budget.nnue_time_ms,
         req.budget.search_timeout_ms,
+        req.nnue_schema.as_deref(),
     )?;
-    let engine_budget = app.build_engine_budget(
+    let engine = app.build_engine_run(
         req.budget.engine_budget_mode.as_deref(),
         req.budget.engine_deterministic_depth,
         req.budget.engine_chance_outcome_depth,
         req.budget.engine_time_ms,
         req.budget.search_timeout_ms,
+        req.engine_schema.as_deref(),
     )?;
-    let p = app.update_params(req.mcts_sims, Some(engine_budget), Some(nnue_budget));
+    let mcts = bqsrv_app::state::AppState::build_mcts_schema(
+        app.params().mcts,
+        req.mcts_sims,
+        req.mcts_schema.as_deref(),
+    )?;
+    let p = app.update_params(Some(mcts), Some(engine), Some(nnue));
     tracing::info!(
         "运行时调整默认引擎参数: mcts_sims={}, engine_mode={}, engine_depth={}, engine_chance_depth={}, nnue_mode={}, nnue_depth={}, nnue_chance_depth={}, search_timeout_ms={}",
-        p.mcts_sims,
-        p.engine_budget.mode.as_str(),
-        p.engine_budget.depth,
-        p.engine_budget.chance_outcome_depth,
-        p.nnue_budget.mode.as_str(),
-        p.nnue_budget.depth,
-        p.nnue_budget.chance_outcome_depth,
-        p.nnue_budget.timeout_ms
+        p.mcts.sims,
+        p.engine.time.mode.as_str(),
+        p.engine.schema.deterministic_depth,
+        p.engine.schema.chance_outcome_depth,
+        p.nnue.time.mode.as_str(),
+        p.nnue.schema.deterministic_depth,
+        p.nnue.schema.chance_outcome_depth,
+        p.nnue.time.timeout_ms
     );
     Ok(Json(p.into()))
 }

@@ -2,13 +2,13 @@ use banqi_core::core::env::DarkChessEnv;
 use banqi_core::core::expectimax::nnue::NnueEvaluate;
 use banqi_core::core::expectimax::{SearchConfig, SearchResult};
 use banqi_engine::nnue::QNnueEvaluator;
-pub use bqsrv_config::{BudgetMode, SearchBudget};
+pub use bqsrv_config::{ExpectimaxRun, RootTuning, TimeBudgetMode};
 pub use bqsrv_dto::NnueSearchStats;
 use std::sync::Arc;
 use std::time::Instant;
 fn nnue_stats_from(
     engine: &'static str,
-    budget: &SearchBudget,
+    run: &ExpectimaxRun,
     cfg: &SearchConfig,
     nodes: u64,
     reached_depth: i32,
@@ -16,8 +16,8 @@ fn nnue_stats_from(
 ) -> NnueSearchStats {
     NnueSearchStats {
         engine,
-        mode: budget.mode.as_str(),
-        depth: if budget.mode == BudgetMode::Depth {
+        mode: run.time.mode.as_str(),
+        depth: if run.time.mode == TimeBudgetMode::Depth {
             cfg.budget.deterministic_depth
         } else {
             0
@@ -29,19 +29,25 @@ fn nnue_stats_from(
     }
 }
 
+fn build_search_config(run: &ExpectimaxRun, roots: RootTuning) -> SearchConfig {
+    let mut cfg = SearchConfig::from(&run.schema);
+    cfg.budget.time_limit_ms = run.time.time_limit_ms();
+    cfg.budget.threads = roots.threads;
+    cfg.root.aspiration = roots.aspiration;
+    cfg.root.chance_exp = roots.chance_exp;
+    cfg
+}
+
 pub fn expectimax_search_tree(
     env: &DarkChessEnv,
     evaluator: Arc<dyn NnueEvaluate>,
-    budget: SearchBudget,
+    run: ExpectimaxRun,
+    roots: RootTuning,
     engine_label: &'static str,
 ) -> Result<(usize, crate::app::expectimax_view::ExpectimaxTree), String> {
-    let budget = budget.clamped();
-    let mut cfg = budget.to_search_config();
+    let run = run.clamped();
+    let mut cfg = build_search_config(&run, roots);
     cfg.res.nnue_evaluator = Some(evaluator);
-    cfg.budget.threads = 1;
-    cfg.root.aspiration = false;
-
-    cfg.root.chance_exp = true;
     let started = Instant::now();
     let SearchResult {
         action,
@@ -56,14 +62,7 @@ pub fn expectimax_search_tree(
     let kept = crate::app::expectimax_view::ExpectimaxTree {
         tree: tree.unwrap_or_default(),
         chosen_action: action,
-        stats: nnue_stats_from(
-            engine_label,
-            &budget,
-            &cfg,
-            nodes,
-            reached_depth,
-            elapsed_ms,
-        ),
+        stats: nnue_stats_from(engine_label, &run, &cfg, nodes, reached_depth, elapsed_ms),
         root_value: value,
     };
     Ok((action, kept))
@@ -72,10 +71,11 @@ pub fn expectimax_search_tree(
 pub fn nnue_search_tree(
     env: &DarkChessEnv,
     evaluator: Arc<QNnueEvaluator>,
-    budget: SearchBudget,
+    run: ExpectimaxRun,
+    roots: RootTuning,
 ) -> Result<(usize, crate::app::expectimax_view::ExpectimaxTree), String> {
     evaluator
         .validate_layout(&env.config)
         .map_err(|e| format!(".nnue 权重与当前变体布局不匹配: {e}"))?;
-    expectimax_search_tree(env, evaluator, budget, "nnue")
+    expectimax_search_tree(env, evaluator, run, roots, "nnue")
 }

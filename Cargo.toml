@@ -21,6 +21,8 @@ banqi-core = { path = "../banqi-core/crates/banqi-core" }
 banqi-engine = { path = "../banqi-engine" }
 bq-inference = { path = "../banqi-engine/crates/bq-inference" }
 bq-util = { path = "../banqi-core/crates/bq-util" }
+# 搜索配置单一 schema（方案 §3.5：bqsrv-config 转发下游使用）
+bq-engine-config = { path = "../banqi-core/crates/bq-engine-config" }
 bq-replay = { path = "../banqi-core/crates/bq-replay" }
 # 共享对局记录契约层（game_record.proto 生成类型 + 回放输入转换）
 bq-record = { path = "../banqi-core/crates/bq-record" }

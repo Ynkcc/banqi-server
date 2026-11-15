@@ -1,4 +1,4 @@
-use crate::app::mcts_view::{mcts_stats_from_session, MctsTree, MctsTreeBox};
+use crate::app::mcts_view::{MctsTree, MctsTreeBox, mcts_stats_from_session};
 use crate::app::models::{EngineKind, ModelPool};
 use banqi_core::core::env::{DarkChessEnv, PositionSnapshot, SnapshotEnv};
 use banqi_core::core::expectimax::rule_eval::RuleMaterialEval;
@@ -100,19 +100,20 @@ impl StrategyKind {
         }
     }
 }
-pub use bqsrv_config::EngineParams;
+use bqsrv_config::MctsSchema;
+pub use bqsrv_config::SlotParams;
 #[derive(Debug, Clone)]
 pub enum PlayerSlot {
     Human,
     Strategy {
         kind: StrategyKind,
         model_file: Option<String>,
-        params: EngineParams,
+        params: SlotParams,
     },
     Agent(Uuid),
 }
 impl PlayerSlot {
-    pub fn strategy(kind: StrategyKind, model_file: Option<String>, params: EngineParams) -> Self {
+    pub fn strategy(kind: StrategyKind, model_file: Option<String>, params: SlotParams) -> Self {
         PlayerSlot::Strategy {
             kind,
             model_file,
@@ -166,7 +167,7 @@ pub struct Agent {
     pub variant: banqi_core::core::env::Variant,
     pub kind: StrategyKind,
     pub model_file: Option<String>,
-    pub params: EngineParams,
+    pub params: SlotParams,
 }
 pub struct Decision {
     pub action: usize,
@@ -226,7 +227,8 @@ pub fn decide(
             let (action, kept) = crate::app::search::expectimax_search_tree(
                 &env,
                 evaluator,
-                params.engine_budget,
+                params.engine,
+                params.roots,
                 "rule",
             )?;
             let (stats, root_value) = (kept.stats.clone(), kept.root_value);
@@ -243,7 +245,7 @@ pub fn decide(
             let file = model_file.ok_or("ExpectimaxNnue 策略未绑定 .nnue 模型文件")?;
             let evaluator = pool.acquire_nnue(&file)?;
             let (action, kept) =
-                crate::app::search::nnue_search_tree(&env, evaluator, params.nnue_budget)?;
+                crate::app::search::nnue_search_tree(&env, evaluator, params.nnue, params.roots)?;
             let (stats, root_value) = (kept.stats.clone(), kept.root_value);
             Ok(Decision {
                 action,
@@ -261,7 +263,7 @@ pub fn decide(
                     model_file,
                     "MctsOnnx 策略未绑定 .onnx 模型文件",
                     &env,
-                    params.mcts_sims,
+                    params.mcts,
                     prev_tree,
                     |f| pool.acquire_onnx(f),
                     banqi_engine::engine::gumbel::mcts_search_onnx::<DarkChessEnv>,
@@ -283,7 +285,7 @@ pub fn decide(
                     model_file,
                     "MctsDL 策略未绑定 .pt 模型文件",
                     &env,
-                    params.mcts_sims,
+                    params.mcts,
                     prev_tree,
                     |f| pool.acquire_torch(f),
                     banqi_engine::engine::gumbel::mcts_search_torch::<DarkChessEnv>,
@@ -302,19 +304,19 @@ fn mcts_branch<M>(
     file: Option<String>,
     missing: &str,
     env: &DarkChessEnv,
-    sims: usize,
+    schema: MctsSchema,
     prev_tree: Option<MctsTree<DarkChessEnv>>,
     acquire: impl FnOnce(&str) -> Result<Arc<M>, String>,
     search: impl FnOnce(
         &DarkChessEnv,
-        usize,
+        MctsSchema,
         Option<Arc<M>>,
         Option<MctsTree<DarkChessEnv>>,
     ) -> Result<MctsTree<DarkChessEnv>, String>,
 ) -> Result<Decision, String> {
     let file = file.ok_or(missing)?;
     let model = acquire(&file)?;
-    let tree = search(env, sims, Some(model), prev_tree)?;
+    let tree = search(env, schema, Some(model), prev_tree)?;
     Ok(mcts_decision(tree))
 }
 
@@ -348,15 +350,26 @@ pub fn dry_run(
 mod tests {
     use super::*;
     use crate::app::envops;
-    use crate::app::search::{BudgetMode, SearchBudget};
     use banqi_core::core::env::Variant;
+    use bqsrv_config::{ExpectimaxRun, ExpectimaxSchema};
     fn initial_snap() -> PositionSnapshot {
         envops::initial_snapshot(Variant::DarkChess4x8)
+    }
+
+    fn engine_run(depth: i32, chance: i32) -> ExpectimaxRun {
+        ExpectimaxRun {
+            schema: ExpectimaxSchema {
+                deterministic_depth: depth,
+                chance_outcome_depth: chance,
+                ..ExpectimaxSchema::default()
+            },
+            ..Default::default()
+        }
     }
     fn human_vs(kind: StrategyKind) -> Slots {
         Slots::new(
             PlayerSlot::Human,
-            PlayerSlot::strategy(kind, None, EngineParams::default()),
+            PlayerSlot::strategy(kind, None, SlotParams::default()),
         )
     }
     #[test]
@@ -428,7 +441,7 @@ mod tests {
             StrategyKind::RevealFirst,
             StrategyKind::CaptureFirst,
         ] {
-            let slot = PlayerSlot::strategy(kind, None, EngineParams::default());
+            let slot = PlayerSlot::strategy(kind, None, SlotParams::default());
             let d = decide(&snap, &slot, None, &dummy_pool()).expect("初始局面必有合法动作");
             let legal =
                 envops::legal_actions(&DarkChessEnv::from_snapshot(&snap).expect("重建不应失败"));
@@ -445,14 +458,9 @@ mod tests {
         let slot = PlayerSlot::strategy(
             StrategyKind::Expectimax,
             None,
-            EngineParams {
-                engine_budget: SearchBudget {
-                    mode: BudgetMode::Depth,
-                    depth: 4,
-                    chance_outcome_depth: 1,
-                    ..Default::default()
-                },
-                ..EngineParams::default()
+            SlotParams {
+                engine: engine_run(4, 1),
+                ..SlotParams::default()
             },
         );
         let d = decide(&snap, &slot, None, &dummy_pool()).expect("小预算搜索应返回动作");
@@ -477,13 +485,9 @@ mod tests {
         let slot = PlayerSlot::strategy(
             StrategyKind::Expectimax,
             None,
-            EngineParams {
-                engine_budget: SearchBudget {
-                    mode: BudgetMode::Depth,
-                    depth: 4,
-                    ..Default::default()
-                },
-                ..EngineParams::default()
+            SlotParams {
+                engine: engine_run(4, 0),
+                ..SlotParams::default()
             },
         );
         let mut s = GameSession::new(

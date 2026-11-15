@@ -7,3 +7,6 @@ description = "Banqi 对弈服务配置层：服务启动参数解析校验与�
 [dependencies]
 banqi-core = { workspace = true }
 bq-inference = { workspace = true }
+# 搜索配置单一 schema（方案 §3.5：bqsrv-config 作为 schema 分发枢纽转发下游）
+bq-engine-config = { workspace = true }
+serde_json = { workspace = true }

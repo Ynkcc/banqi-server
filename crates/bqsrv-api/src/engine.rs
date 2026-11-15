@@ -1,5 +1,5 @@
 use bqsrv_app::app::models::EngineKind;
-use bqsrv_app::app::player::{self, EngineParams, PlayerSlot, StrategyKind};
+use bqsrv_app::app::player::{self, PlayerSlot, SlotParams, StrategyKind};
 use bqsrv_dto::{ApiError, EngineMoveReq, EngineMoveResp};
 use bqsrv_app::state::{GameSession, SharedState};
 use axum::Json;
@@ -51,21 +51,22 @@ pub async fn engine_move(
         .unwrap_or(false);
 
     let (kind, slot) = if rule_engine {
-        let budget = bqsrv_app::state::AppState::build_budget(
-            app.params().engine_budget,
+        let run = bqsrv_app::state::AppState::build_expectimax_run(
+            app.params().engine,
             req.budget.engine_budget_mode.as_deref(),
             req.budget.engine_deterministic_depth,
             req.budget.engine_chance_outcome_depth,
             req.budget.engine_time_ms,
             req.budget.search_timeout_ms,
+            req.engine_schema.as_deref(),
         )?;
         (
             StrategyKind::Expectimax,
             PlayerSlot::strategy(
                 StrategyKind::Expectimax,
                 None,
-                EngineParams {
-                    engine_budget: budget,
+                SlotParams {
+                    engine: run,
                     ..app.params()
                 },
             ),
@@ -75,18 +76,19 @@ pub async fn engine_move(
         let kind = StrategyKind::from_engine_kind(EngineKind::from_model_file(&model_file));
         let slot = match kind {
             StrategyKind::ExpectimaxNnue => {
-                let budget = app.build_search_budget(
+                let run = app.build_nnue_run(
                     req.budget.nnue_budget_mode.as_deref(),
                     req.budget.nnue_deterministic_depth,
                     req.budget.nnue_chance_outcome_depth,
                     req.budget.nnue_time_ms,
                     req.budget.search_timeout_ms,
+                    req.nnue_schema.as_deref(),
                 )?;
                 PlayerSlot::strategy(
                     kind,
                     Some(model_file),
-                    EngineParams {
-                        nnue_budget: budget,
+                    SlotParams {
+                        nnue: run,
                         ..app.params()
                     },
                 )
@@ -94,8 +96,12 @@ pub async fn engine_move(
             _ => PlayerSlot::strategy(
                 kind,
                 Some(model_file),
-                EngineParams {
-                    mcts_sims: req.mcts_sims.unwrap_or_else(|| app.default_sims()).max(1),
+                SlotParams {
+                    mcts: bqsrv_app::state::AppState::build_mcts_schema(
+                        app.params().mcts,
+                        req.mcts_sims,
+                        req.mcts_schema.as_deref(),
+                    )?,
                     ..app.params()
                 },
             ),
