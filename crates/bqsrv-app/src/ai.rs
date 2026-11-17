@@ -388,6 +388,7 @@ pub async fn run_dry_run(
         score: decision.score,
         mcts_stats: decision.mcts_stats,
         nnue_stats: decision.nnue_stats,
+        nnue_greedy: decision.nnue_greedy,
         search_info,
     })
 }

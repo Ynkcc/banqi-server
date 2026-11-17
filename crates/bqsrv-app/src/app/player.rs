@@ -3,7 +3,7 @@ use crate::app::models::{EngineKind, ModelPool};
 use banqi_core::core::env::{DarkChessEnv, PositionSnapshot, SnapshotEnv};
 use banqi_core::core::expectimax::rule_eval::RuleMaterialEval;
 use banqi_engine::engine::{CaptureFirstPolicy, Policy, RandomPolicy, RevealFirstPolicy};
-use bqsrv_dto::{MctsStatsDto, NnueStatsDto};
+use bqsrv_dto::{MctsStatsDto, NnueBranchDto, NnueGreedyActionDto, NnueGreedyDto, NnueStatsDto};
 use std::sync::Arc;
 use uuid::Uuid;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -180,6 +180,8 @@ pub struct Decision {
     pub ex_tree: Option<crate::app::expectimax_view::ExpectimaxTree>,
     pub mcts_stats: Option<MctsStatsDto>,
     pub nnue_stats: Option<NnueStatsDto>,
+
+    pub nnue_greedy: Option<NnueGreedyDto>,
     pub score: Option<f32>,
 }
 impl Decision {
@@ -190,6 +192,7 @@ impl Decision {
             ex_tree: None,
             mcts_stats: None,
             nnue_stats: None,
+            nnue_greedy: None,
             score: None,
         }
     }
@@ -243,6 +246,7 @@ pub fn decide(
                 ex_tree: Some(kept),
                 mcts_stats: None,
                 nnue_stats: Some(NnueStatsDto::from(&stats)),
+                nnue_greedy: None,
                 score: Some(root_value),
             })
         }
@@ -258,21 +262,80 @@ pub fn decide(
                 ex_tree: Some(kept),
                 mcts_stats: None,
                 nnue_stats: Some(NnueStatsDto::from(&stats)),
+                nnue_greedy: None,
                 score: Some(root_value),
             })
         }
         StrategyKind::NnueGreedy => {
             let file = model_file.ok_or("NnueGreedy 策略未绑定 .nnue 模型文件")?;
             let evaluator = pool.acquire_nnue(&file)?;
-            let (action, q) = evaluator
-                .greedy_action(&env)
-                .map_err(|e| format!("NnueGreedy 评估失败: {e}"))?;
+            evaluator
+                .validate_layout(&env.config)
+                .map_err(|e| format!("NnueGreedy 布局校验失败: {e}"))?;
+            let acc = evaluator.compute_accumulator(&env.nnue_active_features());
+            let state = evaluator.prepare_state(&acc);
+            let masks = {
+                let mut m = vec![0i32; env.config.action_space_size];
+                env.action_masks_into(&mut m);
+                m
+            };
+            let snap = env.to_snapshot();
+            let tables = banqi_core::core::env::action_lookup_tables(&env.config);
+            let reveal_cnt = env.config.reveal_actions_count;
+            let mut actions_dto: Vec<NnueGreedyActionDto> = Vec::new();
+            let mut best: Option<(usize, f32)> = None;
+            for (a, &m) in masks.iter().enumerate() {
+                if m != 1 {
+                    continue;
+                }
+                let (q, wdl, mw, ml) = evaluator.q_components_prepared(&state, a);
+                if best.is_none_or(|(_, bq)| q > bq) {
+                    best = Some((a, q));
+                }
+                let coords = &tables.action_to_coords[a];
+                let from = coords[0];
+                let to = *coords.last().unwrap_or(&coords[0]);
+                let is_flip = a < reveal_cnt;
+                let is_capture = !is_flip
+                    && from != to
+                    && matches!(
+                        snap.slots.get(to),
+                        Some(banqi_core::core::env::Slot::Revealed(_))
+                    );
+                actions_dto.push(NnueGreedyActionDto {
+                    action: a,
+                    from,
+                    to,
+                    is_flip,
+                    is_capture,
+                    q: NnueBranchDto {
+                        wdl,
+                        mw,
+                        ml,
+                        value: q,
+                    },
+                });
+            }
+            let (action, q) = best.ok_or("NnueGreedy 评估失败: 无合法动作")?;
+            actions_dto.sort_by(|x, y| y.q.value.total_cmp(&x.q.value));
+            let (v, v_wdl, v_mw, v_ml) = evaluator
+                .v_components_from_state(&state)
+                .unwrap_or_else(|| (q, [0.0, 1.0, 0.0], 0.0, 0.0));
             Ok(Decision {
                 action,
                 mcts_tree: None,
                 ex_tree: None,
                 mcts_stats: None,
                 nnue_stats: None,
+                nnue_greedy: Some(NnueGreedyDto {
+                    v: NnueBranchDto {
+                        wdl: v_wdl,
+                        mw: v_mw,
+                        ml: v_ml,
+                        value: v,
+                    },
+                    actions: actions_dto,
+                }),
                 score: Some(q),
             })
         }
@@ -356,6 +419,7 @@ fn mcts_decision(tree: MctsTree<DarkChessEnv>) -> Decision {
         ex_tree: None,
         mcts_stats,
         nnue_stats: None,
+        nnue_greedy: None,
         score,
     }
 }

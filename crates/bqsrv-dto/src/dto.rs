@@ -406,6 +406,9 @@ pub struct SuggestionResp {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub nnue_stats: Option<NnueStatsDto>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub nnue_greedy: Option<NnueGreedyDto>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -507,6 +510,36 @@ pub struct NnueStatsDto {
     pub nodes: u64,
     pub reached_depth: i32,
     pub elapsed_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct NnueBranchDto {
+    pub wdl: [f32; 3],
+    pub mw: f32,
+    pub ml: f32,
+
+    pub value: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct NnueGreedyDto {
+    pub v: NnueBranchDto,
+
+    pub actions: Vec<NnueGreedyActionDto>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct NnueGreedyActionDto {
+    pub action: usize,
+    pub from: usize,
+    pub to: usize,
+    #[serde(rename = "is_flip")]
+    pub is_flip: bool,
+    #[serde(rename = "is_capture")]
+    pub is_capture: bool,
+    pub q: NnueBranchDto,
 }
 impl From<&NnueSearchStats> for NnueStatsDto {
     fn from(s: &NnueSearchStats) -> Self {
