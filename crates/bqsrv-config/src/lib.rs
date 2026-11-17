@@ -534,8 +534,7 @@ mod tests {
             p.roots,
             RootTuning {
                 aspiration: false,
-                chance_exp: true,
-                threads: 1
+                chance_exp: true
             }
         );
     }

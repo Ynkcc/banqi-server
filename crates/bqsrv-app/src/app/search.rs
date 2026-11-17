@@ -32,7 +32,6 @@ fn nnue_stats_from(
 fn build_search_config(run: &ExpectimaxRun, roots: RootTuning) -> SearchConfig {
     let mut cfg = SearchConfig::from(&run.schema);
     cfg.budget.time_limit_ms = run.time.time_limit_ms();
-    cfg.budget.threads = roots.threads;
     cfg.root.aspiration = roots.aspiration;
     cfg.root.chance_exp = roots.chance_exp;
     cfg
