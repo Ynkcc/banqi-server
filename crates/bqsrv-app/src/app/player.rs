@@ -37,12 +37,12 @@ pub enum StrategyKind {
     CaptureFirst,
     Expectimax,
     ExpectimaxNnue,
+    NnueGreedy,
     MctsOnnx,
     MctsDL,
 }
 impl StrategyKind {
-    pub const KIND_CHOICES: &'static str =
-        "Random / RevealFirst / CaptureFirst / Expectimax / ExpectimaxNnue / MctsOnnx / MctsDL";
+    pub const KIND_CHOICES: &'static str = "Random / RevealFirst / CaptureFirst / Expectimax / ExpectimaxNnue / NnueGreedy / MctsOnnx / MctsDL";
 
     pub fn invalid_kind_msg(raw: &str) -> String {
         format!(
@@ -58,6 +58,7 @@ impl StrategyKind {
             StrategyKind::CaptureFirst => "CaptureFirst",
             StrategyKind::Expectimax => "Expectimax",
             StrategyKind::ExpectimaxNnue => "ExpectimaxNnue",
+            StrategyKind::NnueGreedy => "NnueGreedy",
             StrategyKind::MctsOnnx => "MctsOnnx",
             StrategyKind::MctsDL => "MctsDL",
         }
@@ -70,6 +71,7 @@ impl StrategyKind {
             "capturefirst" => Some(StrategyKind::CaptureFirst),
             "expectimax" | "engine" => Some(StrategyKind::Expectimax),
             "expectimaxnnue" | "nnue" => Some(StrategyKind::ExpectimaxNnue),
+            "nnuegreedy" | "greedy" => Some(StrategyKind::NnueGreedy),
             "mctsonnx" => Some(StrategyKind::MctsOnnx),
             "mctsdl" => Some(StrategyKind::MctsDL),
             _ => None,
@@ -78,7 +80,10 @@ impl StrategyKind {
     pub fn needs_model(self) -> bool {
         matches!(
             self,
-            StrategyKind::ExpectimaxNnue | StrategyKind::MctsOnnx | StrategyKind::MctsDL
+            StrategyKind::ExpectimaxNnue
+                | StrategyKind::NnueGreedy
+                | StrategyKind::MctsOnnx
+                | StrategyKind::MctsDL
         )
     }
     pub fn is_mcts(self) -> bool {
@@ -86,7 +91,7 @@ impl StrategyKind {
     }
     pub fn engine_kind(self) -> Option<EngineKind> {
         match self {
-            StrategyKind::ExpectimaxNnue => Some(EngineKind::Nnue),
+            StrategyKind::ExpectimaxNnue | StrategyKind::NnueGreedy => Some(EngineKind::Nnue),
             StrategyKind::MctsOnnx => Some(EngineKind::MctsOnnx),
             StrategyKind::MctsDL => Some(EngineKind::MctsDL),
             _ => None,
@@ -254,6 +259,21 @@ pub fn decide(
                 mcts_stats: None,
                 nnue_stats: Some(NnueStatsDto::from(&stats)),
                 score: Some(root_value),
+            })
+        }
+        StrategyKind::NnueGreedy => {
+            let file = model_file.ok_or("NnueGreedy 策略未绑定 .nnue 模型文件")?;
+            let evaluator = pool.acquire_nnue(&file)?;
+            let (action, q) = evaluator
+                .greedy_action(&env)
+                .map_err(|e| format!("NnueGreedy 评估失败: {e}"))?;
+            Ok(Decision {
+                action,
+                mcts_tree: None,
+                ex_tree: None,
+                mcts_stats: None,
+                nnue_stats: None,
+                score: Some(q),
             })
         }
         StrategyKind::MctsOnnx => {
