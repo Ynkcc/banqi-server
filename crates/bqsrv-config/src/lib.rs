@@ -534,7 +534,8 @@ mod tests {
             p.roots,
             RootTuning {
                 aspiration: false,
-                chance_exp: true
+                chance_exp: true,
+                ..RootTuning::default()
             }
         );
     }

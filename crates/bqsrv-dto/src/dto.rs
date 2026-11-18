@@ -950,7 +950,13 @@ pub struct RandomRevealsTs {
     pub count: usize,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, rename = "FromFen")]
+pub struct FromFenTs {
+    pub fen: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, rename = "OpeningScenario")]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OpeningScenarioTs {
@@ -958,6 +964,7 @@ pub enum OpeningScenarioTs {
     AdjacentGenerals(AdjacentGeneralsTs),
     AllRevealed(AllRevealedTs),
     RandomReveals(RandomRevealsTs),
+    FromFen(FromFenTs),
 }
 
 pub fn player_label(p: banqi_core::core::env::types::Player) -> String {
@@ -1094,5 +1101,25 @@ mod dto_tests {
         assert_eq!(json.get("count").and_then(|c| c.as_u64()), Some(7));
         let mirror: OpeningScenarioTs = serde_json::from_value(json).expect("反序列化应成功");
         assert!(matches!(mirror, OpeningScenarioTs::RandomReveals(_)));
+
+        {
+            use banqi_core::core::env::seed::SeedableEnv;
+            use banqi_core::core::env::{DarkChessEnv, SnapshotEnv, Variant};
+            let mut env =
+                DarkChessEnv::with_config_and_scenario(Variant::DarkChess4x8.config(), None)
+                    .expect("默认建局应成功");
+            SeedableEnv::set_seed(&mut env, 20261118);
+            let fen = env.to_snapshot().to_fen();
+            let ff = banqi_core::core::env::OpeningScenario::try_from_fen(&fen)
+                .expect("from_fen 场景应可构造");
+            let json = serde_json::to_value(ff).expect("序列化应成功");
+            assert_eq!(json.get("kind").and_then(|k| k.as_str()), Some("from_fen"));
+            assert_eq!(json.get("fen").and_then(|f| f.as_str()), Some(fen.as_str()));
+            let mirror: OpeningScenarioTs = serde_json::from_value(json).expect("反序列化应成功");
+            let OpeningScenarioTs::FromFen(ts) = mirror else {
+                panic!("应解析为 from_fen 变体，实际 {mirror:?}");
+            };
+            assert_eq!(ts.fen, fen, "fen 字段应原样往返");
+        }
     }
 }

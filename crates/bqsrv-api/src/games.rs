@@ -1,13 +1,13 @@
 use crate::parse_variant_or_err;
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::Json;
-use banqi_core::core::env::PositionSnapshot;
+use banqi_core::core::env::{OpeningScenario, PositionSnapshot};
 use bqsrv_app::ai;
 use bqsrv_app::app::player::{PlayerSlot, StrategyKind};
 use bqsrv_app::app::sync::{lock, read_lock, write_lock};
 use bqsrv_app::state::{
-    get_mut_session, get_session, parse_game_id, ArchivedGame, GameSession, SharedState,
+    ArchivedGame, GameSession, SharedState, get_mut_session, get_session, parse_game_id,
 };
 use bqsrv_dto::{
     ApiError, ArchivedGameDetail, CreateGameReq, DryRunReq, GameCreatedResp, GameListResp,
@@ -74,27 +74,48 @@ async fn build_slots(
     ];
     Ok((bqsrv_app::app::player::Slots::new(red, black), labels))
 }
-pub async fn create_game(
-    State(app): State<SharedState>,
-    Json(req): Json<CreateGameReq>,
-) -> Result<Json<GameCreatedResp>, ApiError> {
-    let fen_snapshot = match req.fen.as_deref() {
-        Some(fen) if !fen.trim().is_empty() => {
-            let snap = PositionSnapshot::from_fen(fen.trim())
-                .map_err(|e| ApiError::BadRequest(format!("BFEN 局面解析失败: {e}")))?;
 
+fn resolve_fen_scenario(
+    fen: Option<&str>,
+    scenario: Option<OpeningScenario>,
+    req_variant: Option<&str>,
+) -> Result<
+    (
+        Option<OpeningScenario>,
+        Option<banqi_core::core::env::Variant>,
+    ),
+    ApiError,
+> {
+    let fen_raw = fen.map(str::trim).filter(|s| !s.is_empty());
+    let scenario = match (fen_raw, scenario) {
+        (Some(_), Some(sc)) if !matches!(sc, OpeningScenario::FromFen(_)) => {
+            return Err(ApiError::BadRequest(
+                "scenario 与 fen 互斥：仅 scenario kind = from_fen 时允许同时携带 fen，请二选一"
+                    .to_string(),
+            ));
+        }
+        (Some(fen), None) => Some(
+            OpeningScenario::try_from_fen(fen)
+                .map_err(|e| ApiError::BadRequest(format!("BFEN 局面解析失败: {e}")))?,
+        ),
+        (_, sc) => sc,
+    };
+    let fen_variant = match scenario.as_ref() {
+        Some(OpeningScenario::FromFen(s)) => {
+            let snap = PositionSnapshot::from_fen(s.fen.as_str())
+                .map_err(|e| ApiError::BadRequest(format!("BFEN 局面解析失败: {e}")))?;
             {
-                let s = GameSession::from_snapshot(
+                let probe = GameSession::from_snapshot(
                     snap.variant,
                     snap.clone(),
                     bqsrv_app::app::player::Slots::all_human(),
                 );
-                let (terminated, truncated, _) = s.over_state();
+                let (terminated, truncated, _) = probe.over_state();
                 if terminated || truncated {
                     return Err(ApiError::GameOver);
                 }
             }
-            if let Some(s) = req.variant.as_deref() {
+            if let Some(s) = req_variant {
                 let want = parse_variant_or_err(s)?;
                 if want != snap.variant {
                     return Err(ApiError::BadRequest(format!(
@@ -104,28 +125,28 @@ pub async fn create_game(
                     )));
                 }
             }
-            Some(snap)
+            Some(snap.variant)
         }
         _ => None,
     };
-    let variant = match fen_snapshot.as_ref() {
-        Some(s) => s.variant,
+    Ok((scenario, fen_variant))
+}
+pub async fn create_game(
+    State(app): State<SharedState>,
+    Json(req): Json<CreateGameReq>,
+) -> Result<Json<GameCreatedResp>, ApiError> {
+    let (scenario, fen_variant) =
+        resolve_fen_scenario(req.fen.as_deref(), req.scenario, req.variant.as_deref())?;
+    let variant = match fen_variant {
+        Some(v) => v,
         None => match req.variant.as_deref() {
             None => app.default_variant(),
             Some(s) => parse_variant_or_err(s)?,
         },
     };
-    if req.scenario.is_some() && fen_snapshot.is_some() {
-        return Err(ApiError::BadRequest(
-            "scenario 与 fen 互斥：BFEN 已携带完整局面，请二选一".to_string(),
-        ));
-    }
     let (slots, slot_labels) = build_slots(&app, req.slots.as_ref(), variant).await?;
     let game_id = Uuid::new_v4();
-    let mut session = match fen_snapshot {
-        Some(snap) => GameSession::from_snapshot(variant, snap, slots),
-        None => GameSession::new_with_scenario(variant, req.scenario.as_ref(), slots)?,
-    };
+    let mut session = GameSession::new_with_scenario(variant, scenario.as_ref(), slots)?;
     session.slot_labels = slot_labels;
     let state = session.view(game_id);
 
@@ -140,7 +161,7 @@ pub async fn create_game(
         variant.as_str(),
         state.slots.red.kind,
         state.slots.black.kind,
-        req.scenario.as_ref().map(|s| s.kind_id())
+        scenario.as_ref().map(|s| s.kind_id())
     );
     Ok(Json(GameCreatedResp {
         game_id: game_id.to_string(),
@@ -411,4 +432,93 @@ pub async fn replay_as_new_game(
         game_id: new_id.to_string(),
         state,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use banqi_core::core::env::{DarkChessEnv, Player, SnapshotEnv, Variant};
+
+    fn sample_fen(turn: char) -> String {
+        use banqi_core::core::env::seed::SeedableEnv;
+        let mut env = DarkChessEnv::with_config_and_scenario(Variant::DarkChess4x8.config(), None)
+            .expect("默认建局应成功");
+        SeedableEnv::set_seed(&mut env, 20261118);
+        let mut snap = env.to_snapshot();
+        snap.current_player = match turn {
+            'b' => Player::Black,
+            _ => Player::Red,
+        };
+        snap.to_fen()
+    }
+
+    #[test]
+    fn fen_only_converts_to_from_fen_scenario() {
+        let fen = sample_fen('b');
+        let (scenario, variant) =
+            resolve_fen_scenario(Some(&fen), None, None).expect("fen-only 应归一化为场景");
+        let variant = variant.expect("from_fen 场景应派生变体");
+        assert_eq!(variant, Variant::DarkChess4x8, "变体应从 FEN 派生");
+        assert!(matches!(scenario, Some(OpeningScenario::FromFen(_))));
+
+        let session = GameSession::new_with_scenario(
+            variant,
+            scenario.as_ref(),
+            bqsrv_app::app::player::Slots::all_human(),
+        )
+        .expect("from_fen 场景建局应成功");
+        assert_eq!(
+            session.core.current.current_player,
+            Player::Black,
+            "建局后行棋方应与 FEN 一致"
+        );
+        assert!(
+            !session.core.legal_actions().is_empty(),
+            "from_fen 建局后应有合法动作"
+        );
+        assert_eq!(session.core.version, 0);
+    }
+
+    #[test]
+    fn fen_with_non_from_fen_scenario_is_rejected() {
+        let fen = sample_fen('r');
+        let err =
+            resolve_fen_scenario(Some(&fen), Some(OpeningScenario::with_general(5, 19)), None)
+                .expect_err("fen + 非 from_fen scenario 应互斥报错");
+        assert!(matches!(err, ApiError::BadRequest(_)), "实际 {err:?}");
+
+        let (scenario, variant) =
+            resolve_fen_scenario(None, Some(OpeningScenario::with_general(5, 19)), None)
+                .expect("纯 scenario 不应报错");
+        assert!(variant.is_none(), "非 from_fen 场景不应派生变体");
+        assert!(matches!(
+            scenario,
+            Some(OpeningScenario::CannonStrikeGeneral(_))
+        ));
+    }
+
+    #[test]
+    fn from_fen_scenario_coexists_with_fen() {
+        let fen = sample_fen('r');
+        let sc = OpeningScenario::try_from_fen(&fen).expect("from_fen 场景应可构造");
+        let (scenario, variant) = resolve_fen_scenario(Some(&fen), Some(sc), None)
+            .expect("from_fen scenario + fen 应允许（以 scenario 为准）");
+        assert!(matches!(scenario, Some(OpeningScenario::FromFen(_))));
+        assert_eq!(variant, Some(Variant::DarkChess4x8));
+    }
+
+    #[test]
+    fn fen_variant_mismatch_is_rejected() {
+        let fen = sample_fen('r');
+        let err = resolve_fen_scenario(Some(&fen), None, Some("4x2"))
+            .expect_err("请求变体与 FEN 变体不一致应报错");
+        assert!(
+            matches!(err, ApiError::BadRequest(ref msg) if msg.contains("不一致")),
+            "实际 {err:?}"
+        );
+
+        let long_fen = "x".repeat(banqi_core::core::env::scenario::FROM_FEN_MAX_BYTES + 1);
+        let err = resolve_fen_scenario(Some(&long_fen), None, None).expect_err("超长 FEN 应报错");
+        assert!(matches!(err, ApiError::BadRequest(_)), "实际 {err:?}");
+    }
 }
