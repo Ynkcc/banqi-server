@@ -3,6 +3,7 @@ use banqi_core::core::env::{GameEnv, SnapshotEnv};
 use banqi_core::core::mcts::MctsArena;
 pub use banqi_engine::engine::gumbel::{MctsSearchStats, MctsTree};
 use serde::Serialize;
+use std::collections::{HashSet, VecDeque};
 use ts_rs::TS;
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
@@ -114,6 +115,48 @@ pub fn mcts_node_summary<G: GameEnv>(arena: &MctsArena<G>, node_id: usize) -> Mc
     }
 }
 pub type MctsTreeBox = Box<dyn MctsTreeView>;
+
+fn env_for_node<G: GameEnv>(tree: &MctsTree<G>, node_id: usize) -> Option<(G, Option<usize>)> {
+    if node_id == tree.root_idx {
+        return Some((tree.root_env, None));
+    }
+    let mut queue = VecDeque::from([(tree.root_idx, tree.root_env, None)]);
+    let mut seen = HashSet::new();
+    while let Some((idx, env, via_action)) = queue.pop_front() {
+        if !seen.insert(idx) {
+            continue;
+        }
+        if idx == node_id {
+            return Some((env, via_action));
+        }
+        let node = tree.arena.get(idx);
+        for &(action, child_idx) in &node.children {
+            if env.is_chance_action(action) {
+                queue.push_back((child_idx, env, Some(action)));
+                continue;
+            }
+            let mut child_env = env;
+            if child_env.step_unchecked(action).is_ok() {
+                queue.push_back((child_idx, child_env, Some(action)));
+            }
+        }
+        if node.is_chance_node {
+            if let Some(action) = via_action {
+                let outcomes = env.chance_outcomes_with_delta(action);
+                for &(outcome_id, _, child_idx) in &node.possible_states {
+                    if let Some((_, _, child_env, _)) = outcomes
+                        .iter()
+                        .find(|(id, _, _, _)| *id == outcome_id)
+                    {
+                        queue.push_back((child_idx, *child_env, Some(action)));
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 pub fn mcts_stats_from_session(tree: Option<&MctsTreeBox>) -> Option<bqsrv_dto::MctsStatsDto> {
     Some(bqsrv_dto::MctsStatsDto::from(&tree?.root_info().stats))
 }
@@ -153,25 +196,14 @@ impl<G: GameEnv + SnapshotEnv + 'static> MctsTreeView for MctsTree<G> {
         })
     }
     fn board(&self, node_id: usize) -> Option<MctsNodeBoard> {
-        let node = self.arena.get(node_id);
-        let env = node.env.as_ref()?;
-        let action = if node.is_chance_node {
-            node.possible_states
-                .first()
-                .and_then(|(_, _, idx)| self.arena.get(*idx).env.as_ref())
-                .map(SnapshotEnv::to_snapshot)
-                .map(|s| s.last_action)
-                .filter(|&a| a >= 0)
-                .or_else(|| {
-                    let s = env.to_snapshot();
-                    (s.last_action >= 0).then_some(s.last_action)
-                })
-        } else {
-            let s = env.to_snapshot();
-            (s.last_action >= 0).then_some(s.last_action)
-        };
-        let action = action.map(|a| a as usize);
+        let (env, via_action) = env_for_node(self, node_id)?;
         let snap = env.to_snapshot();
+        let node = self.arena.get(node_id);
+        let action = if node.is_chance_node {
+            via_action.or_else(|| (snap.last_action >= 0).then_some(snap.last_action as usize))
+        } else {
+            (snap.last_action >= 0).then_some(snap.last_action as usize)
+        };
         let move_coords = action
             .and_then(|a| crate::app::envops::coords_for_action(snap.variant, a))
             .unwrap_or_default();
