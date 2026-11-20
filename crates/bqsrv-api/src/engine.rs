@@ -49,6 +49,14 @@ pub async fn engine_move(
         .as_deref()
         .map(|s| s.trim().eq_ignore_ascii_case("rule"))
         .unwrap_or(false);
+    let nnue_mcts_engine = req
+        .engine
+        .as_deref()
+        .map(|s| {
+            let norm = s.trim().to_ascii_lowercase().replace(['-', '_'], "");
+            norm == "mctsnnue" || norm == "nnuemcts"
+        })
+        .unwrap_or(false);
 
     let (kind, slot) = if rule_engine {
         let run = bqsrv_app::state::AppState::build_expectimax_run(
@@ -73,7 +81,11 @@ pub async fn engine_move(
         )
     } else {
         let model_file = app.resolve_model_file(req.model_file.as_deref(), variant)?;
-        let kind = StrategyKind::from_engine_kind(EngineKind::from_model_file(&model_file));
+        let kind = if nnue_mcts_engine {
+            StrategyKind::MctsNnue
+        } else {
+            StrategyKind::from_engine_kind(EngineKind::from_model_file(&model_file))
+        };
         let slot = match kind {
             StrategyKind::ExpectimaxNnue => {
                 let run = app.build_nnue_run(

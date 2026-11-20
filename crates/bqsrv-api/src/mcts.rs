@@ -92,7 +92,7 @@ pub async fn search(
     })
     .await?;
     let tree = decision.mcts_tree.ok_or_else(|| {
-        ApiError::BadRequest("所选模型不产生 MCTS 搜索树（.nnue 为 Expectimax 叶评估后端，请用 POST /api/games/:id/nnue/search）".into())
+        ApiError::BadRequest("所选策略不产生 MCTS 搜索树：Expectimax+NNUE 请用 POST /api/games/:id/nnue/search；使用 NNUE 做 MCTS 请选择 MctsNnue 策略".into())
     })?;
     let info = tree.root_info();
     let mut games = write_lock(&app.games);

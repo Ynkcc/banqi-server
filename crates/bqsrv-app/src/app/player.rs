@@ -40,9 +40,10 @@ pub enum StrategyKind {
     NnueGreedy,
     MctsOnnx,
     MctsDL,
+    MctsNnue,
 }
 impl StrategyKind {
-    pub const KIND_CHOICES: &'static str = "Random / RevealFirst / CaptureFirst / Expectimax / ExpectimaxNnue / NnueGreedy / MctsOnnx / MctsDL";
+    pub const KIND_CHOICES: &'static str = "Random / RevealFirst / CaptureFirst / Expectimax / ExpectimaxNnue / NnueGreedy / MctsOnnx / MctsDL / MctsNnue";
 
     pub fn invalid_kind_msg(raw: &str) -> String {
         format!(
@@ -61,6 +62,7 @@ impl StrategyKind {
             StrategyKind::NnueGreedy => "NnueGreedy",
             StrategyKind::MctsOnnx => "MctsOnnx",
             StrategyKind::MctsDL => "MctsDL",
+            StrategyKind::MctsNnue => "MctsNnue",
         }
     }
     pub fn parse(s: &str) -> Option<Self> {
@@ -74,6 +76,7 @@ impl StrategyKind {
             "nnuegreedy" | "greedy" => Some(StrategyKind::NnueGreedy),
             "mctsonnx" => Some(StrategyKind::MctsOnnx),
             "mctsdl" => Some(StrategyKind::MctsDL),
+            "mctsnnue" | "nnuemcts" => Some(StrategyKind::MctsNnue),
             _ => None,
         }
     }
@@ -84,14 +87,20 @@ impl StrategyKind {
                 | StrategyKind::NnueGreedy
                 | StrategyKind::MctsOnnx
                 | StrategyKind::MctsDL
+                | StrategyKind::MctsNnue
         )
     }
     pub fn is_mcts(self) -> bool {
-        matches!(self, StrategyKind::MctsOnnx | StrategyKind::MctsDL)
+        matches!(
+            self,
+            StrategyKind::MctsOnnx | StrategyKind::MctsDL | StrategyKind::MctsNnue
+        )
     }
     pub fn engine_kind(self) -> Option<EngineKind> {
         match self {
-            StrategyKind::ExpectimaxNnue | StrategyKind::NnueGreedy => Some(EngineKind::Nnue),
+            StrategyKind::ExpectimaxNnue | StrategyKind::NnueGreedy | StrategyKind::MctsNnue => {
+                Some(EngineKind::Nnue)
+            }
             StrategyKind::MctsOnnx => Some(EngineKind::MctsOnnx),
             StrategyKind::MctsDL => Some(EngineKind::MctsDL),
             _ => None,
@@ -377,8 +386,23 @@ pub fn decide(
             #[cfg(not(feature = "torch"))]
             {
                 let _ = (model_file, prev_tree);
-                Err("服务编译未启用 torch 推理，MCTS+DL 策略不可用（可改用 MctsOnnx / ExpectimaxNnue）".into())
+                Err("服务编译未启用 torch 推理，MCTS+DL 策略不可用（可改用 MctsOnnx / MctsNnue）".into())
             }
+        }
+        StrategyKind::MctsNnue => {
+            let file = model_file.ok_or("MctsNnue 策略未绑定 .nnue 模型文件")?;
+            let evaluator = pool.acquire_nnue(&file)?;
+            evaluator
+                .validate_layout(&env.config)
+                .map_err(|e| format!("MctsNnue 布局校验失败: {e}"))?;
+            let schema: MctsSchema = params.mcts;
+            let tree = banqi_engine::engine::gumbel::mcts_search_nnue::<DarkChessEnv>(
+                &env,
+                schema,
+                Some(evaluator),
+                prev_tree,
+            )?;
+            Ok(mcts_decision(tree))
         }
     }
 }
@@ -488,6 +512,8 @@ mod tests {
             Some(StrategyKind::MctsOnnx)
         );
         assert_eq!(StrategyKind::parse("mcts_dl"), Some(StrategyKind::MctsDL));
+        assert_eq!(StrategyKind::parse("MctsNnue"), Some(StrategyKind::MctsNnue));
+        assert_eq!(StrategyKind::parse("nnue-mcts"), Some(StrategyKind::MctsNnue));
         assert!(StrategyKind::parse("pvp").is_none());
         assert!(StrategyKind::parse("human").is_none());
     }
@@ -498,12 +524,19 @@ mod tests {
         assert_eq!(StrategyKind::ExpectimaxNnue.as_str(), "ExpectimaxNnue");
         assert_eq!(StrategyKind::MctsOnnx.as_str(), "MctsOnnx");
         assert_eq!(StrategyKind::MctsDL.as_str(), "MctsDL");
+        assert_eq!(StrategyKind::MctsNnue.as_str(), "MctsNnue");
         assert!(!StrategyKind::Random.needs_model());
         assert!(!StrategyKind::Expectimax.needs_model());
         assert!(StrategyKind::ExpectimaxNnue.needs_model());
         assert!(StrategyKind::MctsOnnx.needs_model());
         assert!(StrategyKind::MctsDL.needs_model());
+        assert!(StrategyKind::MctsNnue.needs_model());
         assert!(StrategyKind::MctsOnnx.is_mcts());
+        assert!(StrategyKind::MctsNnue.is_mcts());
+        assert_eq!(
+            StrategyKind::MctsNnue.engine_kind(),
+            Some(crate::app::models::EngineKind::Nnue)
+        );
         assert!(!StrategyKind::Expectimax.is_mcts());
     }
     #[test]
@@ -595,6 +628,39 @@ mod tests {
             .expect("规则策略步应带搜索统计");
         assert_eq!(step.engine, "rule");
         assert_eq!(step.nodes, d.nnue_stats.as_ref().expect("非空").nodes);
+    }
+    #[test]
+    fn mcts_nnue_returns_legal_action_with_tree() {
+        use banqi_engine::nnue::QNnueEvaluator;
+        let snap = initial_snap();
+        let env = DarkChessEnv::from_snapshot(&snap).expect("重建环境不应失败");
+        let dir = std::env::temp_dir().join(format!("banqi-mcts-nnue-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("创建测试模型目录失败");
+        let path = dir.join("4x8.nnue");
+        let evaluator = QNnueEvaluator::new_dummy(&env.config);
+        evaluator
+            .save_to_file(&path, &evaluator.header)
+            .expect("写测试模型失败");
+        let pool = ModelPool::new(&dir, 0, "cpu", 0);
+        let slot = PlayerSlot::strategy(
+            StrategyKind::MctsNnue,
+            Some(path.to_string_lossy().to_string()),
+            SlotParams {
+                mcts: MctsSchema {
+                    sims: 4,
+                    ..MctsSchema::default()
+                },
+                ..SlotParams::default()
+            },
+        );
+        let d = decide(&snap, &slot, None, &pool).expect("MCTS+NNUE 应返回动作");
+        assert!(
+            envops::legal_actions(&env).contains(&d.action),
+            "MCTS+NNUE 选出的动作必须合法"
+        );
+        assert!(d.mcts_tree.is_some(), "MCTS+NNUE 应携带搜索树");
+        assert!(d.mcts_stats.is_some(), "MCTS+NNUE 应携带搜索统计");
+        std::fs::remove_dir_all(&dir).ok();
     }
     #[test]
     fn human_slot_decision_errors() {
