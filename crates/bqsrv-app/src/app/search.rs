@@ -1,7 +1,7 @@
 use banqi_core::core::env::DarkChessEnv;
 use banqi_core::core::expectimax::nnue::NnueEvaluate;
 use banqi_core::core::expectimax::{SearchConfig, SearchResult};
-use banqi_engine::nnue::QNnueEvaluator;
+use banqi_engine::nnue::GraphEvaluator;
 pub use bqsrv_config::{ExpectimaxRun, RootTuning, TimeBudgetMode};
 pub use bqsrv_dto::NnueSearchStats;
 use std::sync::Arc;
@@ -69,7 +69,7 @@ pub fn expectimax_search_tree(
 
 pub fn nnue_search_tree(
     env: &DarkChessEnv,
-    evaluator: Arc<QNnueEvaluator>,
+    evaluator: Arc<GraphEvaluator>,
     run: ExpectimaxRun,
     roots: RootTuning,
 ) -> Result<(usize, crate::app::expectimax_view::ExpectimaxTree), String> {

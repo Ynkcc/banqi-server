@@ -6,7 +6,7 @@ use crate::app::session::SnapshotSession;
 use crate::app::sync::{lock, read_lock, write_lock};
 use banqi_core::core::env::DarkChessEnv;
 use banqi_core::core::env::{PositionSnapshot, Variant};
-use banqi_engine::nnue::QNnueEvaluator;
+use banqi_engine::nnue::GraphEvaluator;
 use bqsrv_config::{ExpectimaxPartial, ExpectimaxRun, MctsSchema, ServerConfig, TimeBudgetMode};
 use bqsrv_dto::ApiError;
 use bqsrv_dto::{ActionView, GameStateResp, HistoryMoveView, SlotView, SlotsView, winner_str};
@@ -784,7 +784,7 @@ impl AppState {
     pub async fn acquire_nnue_model(
         self: &Arc<Self>,
         model_file: String,
-    ) -> Result<Arc<QNnueEvaluator>, String> {
+    ) -> Result<Arc<GraphEvaluator>, String> {
         let app = Arc::clone(self);
         tokio::task::spawn_blocking(move || app.models.acquire_nnue(&model_file))
             .await
@@ -794,7 +794,7 @@ impl AppState {
         self: &Arc<Self>,
         model_file: String,
         variant: Variant,
-    ) -> Result<Arc<QNnueEvaluator>, String> {
+    ) -> Result<Arc<GraphEvaluator>, String> {
         let app = Arc::clone(self);
         tokio::task::spawn_blocking(move || {
             app.models

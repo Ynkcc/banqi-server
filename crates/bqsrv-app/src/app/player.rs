@@ -281,23 +281,16 @@ pub fn decide(
             evaluator
                 .validate_layout(&env.config)
                 .map_err(|e| format!("NnueGreedy 布局校验失败: {e}"))?;
-            let acc = evaluator.compute_accumulator(&env.nnue_active_features());
-            let state = evaluator.prepare_state(&acc);
-            let masks = {
-                let mut m = vec![0i32; env.config.action_space_size];
-                env.action_masks_into(&mut m);
-                m
-            };
+            let legal = env.legal_action_indices();
             let snap = env.to_snapshot();
             let tables = banqi_core::core::env::action_lookup_tables(&env.config);
             let reveal_cnt = env.config.reveal_actions_count;
             let mut actions_dto: Vec<NnueGreedyActionDto> = Vec::new();
             let mut best: Option<(usize, f32)> = None;
-            for (a, &m) in masks.iter().enumerate() {
-                if m != 1 {
-                    continue;
-                }
-                let (q, wdl, mw, ml) = evaluator.q_components_prepared(&state, a);
+            for a in legal {
+                let (q, wdl, mw, ml) = evaluator
+                    .q_components_for_env(&env, a)
+                    .map_err(|e| format!("NnueGreedy Q 分量读取失败: {e}"))?;
                 if best.is_none_or(|(_, bq)| q > bq) {
                     best = Some((a, q));
                 }
@@ -328,8 +321,8 @@ pub fn decide(
             let (action, q) = best.ok_or("NnueGreedy 评估失败: 无合法动作")?;
             actions_dto.sort_by(|x, y| y.q.value.total_cmp(&x.q.value));
             let (v, v_wdl, v_mw, v_ml) = evaluator
-                .v_components_from_state(&state)
-                .unwrap_or_else(|| (q, [0.0, 1.0, 0.0], 0.0, 0.0));
+                .value_components_for_env(&env)
+                .unwrap_or_else(|_| (q, [0.0, 1.0, 0.0], 0.0, 0.0));
             Ok(Decision {
                 action,
                 mcts_tree: None,
@@ -631,16 +624,14 @@ mod tests {
     }
     #[test]
     fn mcts_nnue_returns_legal_action_with_tree() {
-        use banqi_engine::nnue::QNnueEvaluator;
+        use banqi_engine::nnue::{GraphEvaluator, graph::save_model};
         let snap = initial_snap();
         let env = DarkChessEnv::from_snapshot(&snap).expect("重建环境不应失败");
         let dir = std::env::temp_dir().join(format!("banqi-mcts-nnue-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("创建测试模型目录失败");
         let path = dir.join("4x8.nnue");
-        let evaluator = QNnueEvaluator::new_dummy(&env.config);
-        evaluator
-            .save_to_file(&path, &evaluator.header)
-            .expect("写测试模型失败");
+        let evaluator = GraphEvaluator::new_dummy(&env.config);
+        save_model(&path, &evaluator.graph, &evaluator.weights).expect("写测试模型失败");
         let pool = ModelPool::new(&dir, 0, "cpu", 0);
         let slot = PlayerSlot::strategy(
             StrategyKind::MctsNnue,
